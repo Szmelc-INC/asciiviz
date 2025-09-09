@@ -29,6 +29,7 @@ typedef struct {
     // render
     int fps;
     int use_color;
+    int color_func;       // 1=use function math for color palette index
     int transparent_ws;   // don't color spaces
     long duration_ms;     // -1 for infinite
     int width, height;
@@ -59,6 +60,7 @@ static void set_defaults(Config *c){
     memset(c,0,sizeof(*c));
     c->fps = 30;
     c->use_color = 1;
+    c->color_func = 0;
     c->transparent_ws = 1;
     c->duration_ms = -1;
     c->width = 0; c->height = 0;
@@ -127,6 +129,7 @@ static void parse_ini(Config *c, const char *text){
         if(strieq(sect,"render")){
             if(strieq(key,"fps")) c->fps = atoi(val);
             else if(strieq(key,"use_color")) c->use_color = atoi(val);
+            else if(strieq(key,"color_func")) c->color_func = atoi(val);
             else if(strieq(key,"transparent_ws")||strieq(key,"transparent_spaces")) c->transparent_ws = atoi(val);
             else if(strieq(key,"duration")) c->duration_ms = (long)(atof(val)*1000.0);
             else if(strieq(key,"width")) c->width = atoi(val);
@@ -540,9 +543,9 @@ static void draw_info_bar(App *a){
     char bgshow[24]; snprintf(bgshow,sizeof(bgshow),"'%s'", bgdisp);
 
     snprintf(bar,sizeof(bar),
-        "\x1b[0m\x1b[2m[FPS:%d%s] [mode:%s] [color:%s:%s] [char:%s] [bg:%s] [ws:%s]  keys: q quit | p pause | i info | W ws-transp | w cycle-bg | +/- fps | C toggle-color | c next-col | n next-char | m next-func | r reload | arrows/[] pan/zoom\x1b[0m",
+        "\x1b[0m\x1b[2m[FPS:%d%s] [mode:%s] [color:%s:%s:%s] [char:%s] [bg:%s] [ws:%s]  keys: q quit | p pause | i info | W ws-transp | w cycle-bg | +/- fps | C toggle-color | c next-col | f col-math | n next-char | m next-func | r reload | arrows/[] pan/zoom\x1b[0m",
         a->cfg.fps, a->paused?" paused":"", m,
-        a->cfg.use_color?"on":"off", colname,
+        a->cfg.use_color?"on":"off", colname, a->cfg.color_func?"func":"pal",
         a->acs.name[0]?a->acs.name:"(unnamed)",
         bgshow,
         a->cfg.transparent_ws?"transp":"color");
@@ -553,6 +556,18 @@ static inline size_t cs_idx_from_value(const ActiveCharset *cs, double v){
     int n=cs->count; if(n<=1) return 0;
     double t = (v+1.0)*0.5; if(t<0)t=0; if(t>1)t=1;
     size_t idx=(size_t)floor(t*(n-1)+0.5);
+    return idx;
+}
+
+static inline int col_idx_from_value(const ActiveColor *ac, double v){
+    int n = ac->count;
+    if(n<=1) return 0;
+    double t = (v+1.0)*0.5;
+    if(t<0) t=0;
+    if(t>1) t=1;
+    int idx = (int)floor(t*(n-1)+0.5);
+    if(idx<0) idx=0;
+    if(idx>=n) idx=n-1;
     return idx;
 }
 
@@ -594,7 +609,14 @@ static void render_expr(App *a, double t){
             // substitute background when palette gives space
             const Glyph *eg = g->is_space ? &a->bg.bg : g;
 
-            int ci = pixel_color_code(a,i,j,x,y,t);
+            int ci;
+            if(a->cfg.color_func && a->cur_col.valid && a->cur_col.count>0){
+                int n=a->cur_col.count;
+                int cidx = (col_idx_from_value(&a->cur_col, val) + (int)lrint(t*20.0)) % n;
+                ci = a->cur_col.codes[cidx];
+            } else {
+                ci = pixel_color_code(a,i,j,x,y,t);
+            }
             int want_color = (ci>=0) && !(a->cfg.transparent_ws && eg->is_space);
 
             if(want_color){
@@ -616,6 +638,7 @@ static void render_mandel(App *a){
     const int w=a->tw;
     const int content_h = a->th - (a->show_info ? 1 : 0);
     const double ar = (double)content_h/(double)(w>0?w:1);
+    double t = now_sec() - a->t0;
 
     for(int j=0;j<content_h;j++){
         term_move(j+1, 1);
@@ -636,7 +659,14 @@ static void render_mandel(App *a){
             const Glyph *g = &a->acs.g[idx];
             const Glyph *eg = g->is_space ? &a->bg.bg : g;
 
-            int ci = pixel_color_code(a,i,j,x0,y0, now_sec()-a->t0);
+            int ci;
+            if(a->cfg.color_func && a->cur_col.valid && a->cur_col.count>0){
+                int n=a->cur_col.count;
+                int cidx = (iter + (int)lrint(t*20.0)) % n;
+                ci = a->cur_col.codes[cidx];
+            } else {
+                ci = pixel_color_code(a,i,j,x0,y0,t);
+            }
             int want_color = (ci>=0) && !(a->cfg.transparent_ws && eg->is_space);
 
             if(want_color){
@@ -658,6 +688,7 @@ static void render_julia(App *a){
     const int w=a->tw;
     const int content_h = a->th - (a->show_info ? 1 : 0);
     const double ar = (double)content_h/(double)(w>0?w:1);
+    double t = now_sec() - a->t0;
 
     for(int j=0;j<content_h;j++){
         term_move(j+1, 1);
@@ -678,7 +709,14 @@ static void render_julia(App *a){
             const Glyph *g = &a->acs.g[idx];
             const Glyph *eg = g->is_space ? &a->bg.bg : g;
 
-            int ci = pixel_color_code(a,i,j,zx,zy, now_sec()-a->t0);
+            int ci;
+            if(a->cfg.color_func && a->cur_col.valid && a->cur_col.count>0){
+                int n=a->cur_col.count;
+                int cidx = (iter + (int)lrint(t*20.0)) % n;
+                ci = a->cur_col.codes[cidx];
+            } else {
+                ci = pixel_color_code(a,i,j,zx,zy,t);
+            }
             int want_color = (ci>=0) && !(a->cfg.transparent_ws && eg->is_space);
 
             if(want_color){
@@ -761,8 +799,8 @@ static int find_color_index(const char *name){
 }
 static void usage(const char *argv0){
     fprintf(stderr,
-"Usage: %s [--config file] [--preset NAME] [--char NAME] [--color NAME] [--background UTF8]\n"
-"Keys: q quit | p pause | i info | W whitespace-transparency | w cycle background | +/- fps | C toggle color | c next color | n next char | m next function | r reload | arrows/[] pan/zoom\n",
+"Usage: %s [--config file] [--preset NAME] [--char NAME] [--color NAME] [--background UTF8] [--color-func]\n"
+"Keys: q quit | p pause | i info | W whitespace-transparency | w cycle background | +/- fps | C toggle color | c next color | f col-math | n next char | m next function | r reload | arrows/[] pan/zoom\n",
     argv0);
     if(g_baked_presets_count){
         fprintf(stderr,"Functions:"); for(size_t i=0;i<g_baked_presets_count;i++) fprintf(stderr," %s", g_baked_presets[i].name); fprintf(stderr,"\n");
@@ -800,6 +838,8 @@ int main(int argc, char **argv){
             if(i+1<argc){ color_name=argv[++i]; } else { usage(argv[0]); return 1; }
         } else if(!strcmp(argv[i],"--background")){
             if(i+1<argc){ background_arg=argv[++i]; } else { usage(argv[0]); return 1; }
+        } else if(!strcmp(argv[i],"--color-func")){
+            app.cfg.color_func = 1;
         } else if(!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")){
             usage(argv[0]); return 0;
         } else {
@@ -883,6 +923,7 @@ int main(int argc, char **argv){
             else if(c=='-'){ app.cfg.fps = clamp_long(app.cfg.fps-1,1,240); }
             else if(c=='C'){ app.cfg.use_color = !app.cfg.use_color; }
             else if(c=='c'){ if(g_color_pals_count){ g_colorpal_idx = (g_colorpal_idx+1) % (int)g_color_pals_count; app.cfg.use_color=1; } }
+            else if(c=='f'){ app.cfg.color_func = !app.cfg.color_func; }
             else if(c=='n'){
                 if(g_char_pals_count){ g_charpal_idx = (g_charpal_idx+1) % (int)g_char_pals_count; app_pick_charset(&app); }
                 else { g_charpal_idx = -1; g_charpal_fb_idx = (g_charpal_fb_idx+1)%4; app_pick_charset(&app); }
