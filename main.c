@@ -22,6 +22,12 @@
 #define COL_STATE "\x1b[4;38;5;118m"    /* underline lime green */
 #define COL_VALUE "\x1b[1;31m"          /* bright red bold */
 
+/* colors for editor mode */
+#define COL_EKEY   "\x1b[1;32m"         /* bright green bold */
+#define COL_ENAME  "\x1b[38;5;240m"     /* grey */
+#define COL_EVALUE "\x1b[1;37m"         /* white bold */
+#define COL_ESEL   "\x1b[7m"            /* reverse video for selection */
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -32,6 +38,16 @@
 typedef enum { MODE_EXPR=0, MODE_MANDELBROT=1, MODE_JULIA=2 } ModeType;
 
 typedef enum { INFO_ALL=0, INFO_NONE=1, INFO_VALUES=2 } InfoMode;
+
+/* application run modes */
+typedef enum { RUNMODE_PLAYER=0, RUNMODE_EDITOR=1 } RunMode;
+
+/* editable parameters in editor mode */
+typedef enum {
+    EP_FPS=0,
+    EP_EXPR=1,
+    EP_COUNT
+} EditorParam;
 
 typedef struct {
     // render
@@ -508,6 +524,14 @@ typedef struct {
     InfoMode      info_mode;     // info bar mode
     int           info_rows;     // computed lines reserved for info bar
 
+    RunMode       run_mode;      // player or editor
+    EditorParam   editor_param;  // currently selected parameter
+    int           editor_step_idx; // index into step table
+    int           editing_text;  // editing raw text flag
+    char          edit_buf[1024];
+    char          edit_orig[1024];
+    size_t        edit_len;
+
     ActiveCharset acs;
     ActiveColor   cur_col;
     int           cached_col_idx;
@@ -539,40 +563,114 @@ static void app_query_size(App *a){
 
 static void append_str(const char *s){ write(STDOUT_FILENO,s,strlen(s)); }
 
-static void format_info_strings(App *a, char *line1, size_t n1, char *line2, size_t n2){
-    const char *m = (a->cfg.mode==MODE_EXPR)?"expr":(a->cfg.mode==MODE_MANDELBROT)?"mandelbrot":"julia";
-    const char *colname = a->cur_col.valid ? a->cur_col.name : "expr";
-    char bgdisp[16];
-    snprintf(bgdisp,sizeof(bgdisp),"%s", a->bg.bg.glyph[0] ? a->bg.bg.glyph : " ");
-    char bgshow[24];
-    snprintf(bgshow,sizeof(bgshow),"'%s'", bgdisp);
+/* --- editor helpers ----------------------------------------------------- */
+static const double EDIT_STEPS[] = {0.01,0.1,1.0,10.0};
+static const int EDIT_STEP_COUNT = sizeof(EDIT_STEPS)/sizeof(EDIT_STEPS[0]);
 
-    if(line1 && n1){
-        snprintf(line1,n1,
-            COL_RESET "[%sFPS%s:%s%d%s] [%s%s%s](%s%s%s) [%s%s%s](%s%s%s:%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%sws%s:%s%s%s)" COL_RESET,
-            COL_NAME, COL_RESET, COL_VALUE, a->cfg.fps, COL_RESET,
-            COL_KEY, "m", COL_RESET, COL_NAME, m, COL_RESET,
-            COL_KEY, "c", COL_RESET, COL_NAME, colname, COL_RESET, COL_STATE, a->cfg.color_func?"func":"pal", COL_RESET,
-            COL_KEY, "n", COL_RESET, COL_NAME, a->acs.name[0]?a->acs.name:"(unnamed)", COL_RESET,
-            COL_KEY, "w", COL_RESET, COL_VALUE, bgshow, COL_RESET,
-            COL_KEY, "W", COL_RESET, COL_NAME, COL_RESET, COL_STATE, a->cfg.transparent_ws?"transp":"color", COL_RESET);
+static void editor_adjust_param(App *a, int dir){
+    double step = EDIT_STEPS[a->editor_step_idx];
+    switch(a->editor_param){
+        case EP_FPS:
+            a->cfg.fps = (int)clamp_long(a->cfg.fps + dir*(int)step,1,240);
+            break;
+        default:
+            break;
     }
-    if(line2 && n2){
-        snprintf(line2,n2,
-            COL_RESET "%s[q]%s quit | %s[p]%s pause | %s[i]%s info | %s[w]%s cycle-bg | %s[W]%s ws-transp | %s[+/-]%s fps | %s[C]%s toggle-color | %s[c]%s next-col | %s[f]%s col-math | %s[n]%s next-char | %s[m]%s next-func | %s[r]%s reload | %s[arrows/[]]%s pan/zoom" COL_RESET,
-            COL_KEY, COL_RESET,  /* q */
-            COL_KEY, COL_RESET,  /* p */
-            COL_KEY, COL_RESET,  /* i */
-            COL_KEY, COL_RESET,  /* w */
-            COL_KEY, COL_RESET,  /* W */
-            COL_KEY, COL_RESET,  /* +/- */
-            COL_KEY, COL_RESET,  /* C */
-            COL_KEY, COL_RESET,  /* c */
-            COL_KEY, COL_RESET,  /* f */
-            COL_KEY, COL_RESET,  /* n */
-            COL_KEY, COL_RESET,  /* m */
-            COL_KEY, COL_RESET,  /* r */
-            COL_KEY, COL_RESET); /* arrows */
+}
+
+static void start_text_edit(App *a){
+    if(a->editor_param==EP_EXPR){
+        a->editing_text = 1;
+        strncpy(a->edit_buf, a->cfg.expr_value, sizeof(a->edit_buf)-1);
+        a->edit_buf[sizeof(a->edit_buf)-1]=0;
+        strncpy(a->edit_orig, a->cfg.expr_value, sizeof(a->edit_orig)-1);
+        a->edit_orig[sizeof(a->edit_orig)-1]=0;
+        a->edit_len = strlen(a->edit_buf);
+    }
+}
+
+static void apply_edit_text(App *a, int exit_after){
+    if(a->editor_param==EP_EXPR){
+        strncpy(a->cfg.expr_value, a->edit_buf, sizeof(a->cfg.expr_value)-1);
+        a->cfg.expr_value[sizeof(a->cfg.expr_value)-1]=0;
+    }
+    if(exit_after) a->editing_text = 0;
+}
+
+static void cancel_edit_text(App *a){
+    if(a->editor_param==EP_EXPR){
+        strncpy(a->cfg.expr_value, a->edit_orig, sizeof(a->cfg.expr_value)-1);
+        a->cfg.expr_value[sizeof(a->cfg.expr_value)-1]=0;
+    }
+    a->editing_text = 0;
+}
+
+static void format_info_strings(App *a, char *line1, size_t n1, char *line2, size_t n2){
+    if(a->run_mode==RUNMODE_PLAYER){
+        const char *m = (a->cfg.mode==MODE_EXPR)?"expr":(a->cfg.mode==MODE_MANDELBROT)?"mandelbrot":"julia";
+        const char *colname = a->cur_col.valid ? a->cur_col.name : "expr";
+        char bgdisp[16];
+        snprintf(bgdisp,sizeof(bgdisp),"%s", a->bg.bg.glyph[0] ? a->bg.bg.glyph : " ");
+        char bgshow[24];
+        snprintf(bgshow,sizeof(bgshow),"'%s'", bgdisp);
+
+        if(line1 && n1){
+            snprintf(line1,n1,
+                COL_RESET "[%sFPS%s:%s%d%s] [%s%s%s](%s%s%s) [%s%s%s](%s%s%s:%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%sws%s:%s%s%s)" COL_RESET,
+                COL_NAME, COL_RESET, COL_VALUE, a->cfg.fps, COL_RESET,
+                COL_KEY, "m", COL_RESET, COL_NAME, m, COL_RESET,
+                COL_KEY, "c", COL_RESET, COL_NAME, colname, COL_RESET, COL_STATE, a->cfg.color_func?"func":"pal", COL_RESET,
+                COL_KEY, "n", COL_RESET, COL_NAME, a->acs.name[0]?a->acs.name:"(unnamed)", COL_RESET,
+                COL_KEY, "w", COL_RESET, COL_VALUE, bgshow, COL_RESET,
+                COL_KEY, "W", COL_RESET, COL_NAME, COL_RESET, COL_STATE, a->cfg.transparent_ws?"transp":"color", COL_RESET);
+        }
+        if(line2 && n2){
+            snprintf(line2,n2,
+                COL_RESET "%s[q]%s quit | %s[p]%s pause | %s[i]%s info | %s[w]%s cycle-bg | %s[W]%s ws-transp | %s[+/-]%s fps | %s[C]%s toggle-color | %s[c]%s next-col | %s[f]%s col-math | %s[n]%s next-char | %s[m]%s next-func | %s[r]%s reload | %s[arrows/[]]%s pan/zoom" COL_RESET,
+                COL_KEY, COL_RESET,  /* q */
+                COL_KEY, COL_RESET,  /* p */
+                COL_KEY, COL_RESET,  /* i */
+                COL_KEY, COL_RESET,  /* w */
+                COL_KEY, COL_RESET,  /* W */
+                COL_KEY, COL_RESET,  /* +/- */
+                COL_KEY, COL_RESET,  /* C */
+                COL_KEY, COL_RESET,  /* c */
+                COL_KEY, COL_RESET,  /* f */
+                COL_KEY, COL_RESET,  /* n */
+                COL_KEY, COL_RESET,  /* m */
+                COL_KEY, COL_RESET,  /* r */
+                COL_KEY, COL_RESET); /* arrows */
+        }
+    }else{ /* editor mode */
+        double step = EDIT_STEPS[a->editor_step_idx];
+        if(line1 && n1){
+            const char *sel1 = (a->editor_param==EP_FPS)?COL_ESEL:COL_RESET;
+            const char *sel2 = (a->editor_param==EP_EXPR)?COL_ESEL:COL_RESET;
+            snprintf(line1,n1,
+                COL_RESET "%s[" COL_ENAME "FPS" COL_EVALUE ":%d]" COL_RESET " "
+                "%s[" COL_ENAME "Expr" COL_EVALUE ":%s]" COL_RESET " "
+                "[" COL_ENAME "step" COL_RESET ":" COL_EVALUE "%.2f" COL_RESET "]",
+                sel1, a->cfg.fps,
+                sel2, a->cfg.expr_value,
+                step);
+        }
+        if(line2 && n2){
+            if(a->editing_text){
+                snprintf(line2,n2,
+                    COL_RESET "Edit: %s%s%s (%s^S%s save %s^R%s run %s^X%s cancel)" COL_RESET,
+                    COL_EVALUE, a->edit_buf, COL_RESET,
+                    COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET);
+            }else{
+                snprintf(line2,n2,
+                    COL_RESET "%s[^T]%s player | %s[arrows]%s select/adjust | %s[+/-]%s adjust | %s[[]]%s step | %s[^E]%s edit | %s[i]%s info" COL_RESET,
+                    COL_EKEY, COL_RESET,
+                    COL_EKEY, COL_RESET,
+                    COL_EKEY, COL_RESET,
+                    COL_EKEY, COL_RESET,
+                    COL_EKEY, COL_RESET,
+                    COL_EKEY, COL_RESET);
+            }
+        }
     }
 }
 
@@ -898,6 +996,10 @@ int main(int argc, char **argv){
     app.info_rows = 0;
     app.cached_col_idx = -9999;
     app.cur_preset_idx = -1;
+    app.run_mode = RUNMODE_PLAYER;
+    app.editor_param = EP_FPS;
+    app.editor_step_idx = 2; /* step=1 */
+    app.editing_text = 0; app.edit_buf[0]=0; app.edit_orig[0]=0; app.edit_len=0;
 
     const char *config_path = NULL;
     const char *preset = NULL;
@@ -992,41 +1094,70 @@ int main(int argc, char **argv){
         char keys[64]; int n=read_key(keys,sizeof(keys));
         for(int k=0;k<n;k++){
             unsigned char c=keys[k];
-            if(c=='q') goto out;
-            else if(c=='p'){ app.paused = !app.paused; if(!app.paused) start = now_sec() - (app.t0 - start); }
-            else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
-            else if(c=='W'){ app.cfg.transparent_ws = !app.cfg.transparent_ws; }
-            else if(c=='w'){ bg_cycle_next(&app.bg); }
-            else if(c=='+'){ app.cfg.fps = clamp_long(app.cfg.fps+1,1,240); }
-            else if(c=='-'){ app.cfg.fps = clamp_long(app.cfg.fps-1,1,240); }
-            else if(c=='C'){ app.cfg.use_color = !app.cfg.use_color; }
-            else if(c=='c'){ if(g_color_pals_count){ g_colorpal_idx = (g_colorpal_idx+1) % (int)g_color_pals_count; app.cfg.use_color=1; } }
-            else if(c=='f'){ app.cfg.color_func = !app.cfg.color_func; }
-            else if(c=='n'){
-                if(g_char_pals_count){ g_charpal_idx = (g_charpal_idx+1) % (int)g_char_pals_count; app_pick_charset(&app); }
-                else { g_charpal_idx = -1; g_charpal_fb_idx = (g_charpal_fb_idx+1)%4; app_pick_charset(&app); }
-            }
-            else if(c=='m'){ if(g_baked_presets_count){ int next=(app.cur_preset_idx>=0)?(app.cur_preset_idx+1)%(int)g_baked_presets_count:0; load_baked_preset_by_index(&app,next); app_pick_charset(&app); app_init_background(&app); } }
-            else if(c=='r'){
-                if(config_path){ load_config_from_file(&app, config_path); app_pick_charset(&app); app.cached_col_idx=-9999; app_init_background(&app); }
-                else if(app.cur_preset_idx>=0){ load_baked_preset_by_index(&app, app.cur_preset_idx); app_pick_charset(&app); app.cached_col_idx=-9999; app_init_background(&app); }
-            }
-            else if(c==0x1b){
-                if(k+2<n && keys[k+1]=='['){
-                    char d=keys[k+2];
-                    if(app.cfg.mode==MODE_MANDELBROT || app.cfg.mode==MODE_JULIA){
-                        double pan = app.cfg.scale*0.05;
-                        if(d=='A') app.cfg.cy -= pan;
-                        if(d=='B') app.cfg.cy += pan;
-                        if(d=='C') app.cfg.cx += pan;
-                        if(d=='D') app.cfg.cx -= pan;
-                    }
-                    k+=2;
+            if(app.run_mode==RUNMODE_PLAYER){
+                if(c==0x14){ app.run_mode=RUNMODE_EDITOR; }
+                else if(c=='q') goto out;
+                else if(c=='p'){ app.paused = !app.paused; if(!app.paused) start = now_sec() - (app.t0 - start); }
+                else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
+                else if(c=='W'){ app.cfg.transparent_ws = !app.cfg.transparent_ws; }
+                else if(c=='w'){ bg_cycle_next(&app.bg); }
+                else if(c=='+'){ app.cfg.fps = clamp_long(app.cfg.fps+1,1,240); }
+                else if(c=='-'){ app.cfg.fps = clamp_long(app.cfg.fps-1,1,240); }
+                else if(c=='C'){ app.cfg.use_color = !app.cfg.use_color; }
+                else if(c=='c'){ if(g_color_pals_count){ g_colorpal_idx = (g_colorpal_idx+1) % (int)g_color_pals_count; app.cfg.use_color=1; } }
+                else if(c=='f'){ app.cfg.color_func = !app.cfg.color_func; }
+                else if(c=='n'){
+                    if(g_char_pals_count){ g_charpal_idx = (g_charpal_idx+1) % (int)g_char_pals_count; app_pick_charset(&app); }
+                    else { g_charpal_idx = -1; g_charpal_fb_idx = (g_charpal_fb_idx+1)%4; app_pick_charset(&app); }
                 }
-            } else if(c=='[' || c==']'){
-                if(app.cfg.mode==MODE_MANDELBROT || app.cfg.mode==MODE_JULIA){
-                    if(c==']') app.cfg.scale *= 0.9;
-                    else app.cfg.scale *= 1.1;
+                else if(c=='m'){ if(g_baked_presets_count){ int next=(app.cur_preset_idx>=0)?(app.cur_preset_idx+1)%(int)g_baked_presets_count:0; load_baked_preset_by_index(&app,next); app_pick_charset(&app); app_init_background(&app); } }
+                else if(c=='r'){
+                    if(config_path){ load_config_from_file(&app, config_path); app_pick_charset(&app); app.cached_col_idx=-9999; app_init_background(&app); }
+                    else if(app.cur_preset_idx>=0){ load_baked_preset_by_index(&app, app.cur_preset_idx); app_pick_charset(&app); app.cached_col_idx=-9999; app_init_background(&app); }
+                }
+                else if(c==0x1b){
+                    if(k+2<n && keys[k+1]=='['){
+                        char d=keys[k+2];
+                        if(app.cfg.mode==MODE_MANDELBROT || app.cfg.mode==MODE_JULIA){
+                            double pan = app.cfg.scale*0.05;
+                            if(d=='A') app.cfg.cy -= pan;
+                            if(d=='B') app.cfg.cy += pan;
+                            if(d=='C') app.cfg.cx += pan;
+                            if(d=='D') app.cfg.cx -= pan;
+                        }
+                        k+=2;
+                    }
+                } else if(c=='[' || c==']'){
+                    if(app.cfg.mode==MODE_MANDELBROT || app.cfg.mode==MODE_JULIA){
+                        if(c==']') app.cfg.scale *= 0.9;
+                        else app.cfg.scale *= 1.1;
+                    }
+                }
+            }else{ /* editor mode */
+                if(app.editing_text){
+                    if(c==0x13){ apply_edit_text(&app,1); }
+                    else if(c==0x12){ apply_edit_text(&app,0); }
+                    else if(c==0x18){ cancel_edit_text(&app); }
+                    else if(c==0x7f){ if(app.edit_len>0) { app.edit_buf[--app.edit_len]=0; } }
+                    else if(c>=32 && c<127){ if(app.edit_len<sizeof(app.edit_buf)-1){ app.edit_buf[app.edit_len++]=c; app.edit_buf[app.edit_len]=0; } }
+                }else{
+                    if(c==0x14){ app.run_mode=RUNMODE_PLAYER; }
+                    else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
+                    else if(c=='+'){ editor_adjust_param(&app,+1); }
+                    else if(c=='-'){ editor_adjust_param(&app,-1); }
+                    else if(c=='['){ if(app.editor_step_idx>0) app.editor_step_idx--; }
+                    else if(c==']'){ if(app.editor_step_idx+1<EDIT_STEP_COUNT) app.editor_step_idx++; }
+                    else if(c==0x05){ start_text_edit(&app); }
+                    else if(c==0x1b){
+                        if(k+2<n && keys[k+1]=='['){
+                            char d=keys[k+2];
+                            if(d=='C') app.editor_param = (app.editor_param+1)%EP_COUNT;
+                            else if(d=='D') app.editor_param = (app.editor_param+EP_COUNT-1)%EP_COUNT;
+                            else if(d=='A') editor_adjust_param(&app,+1);
+                            else if(d=='B') editor_adjust_param(&app,-1);
+                            k+=2;
+                        }
+                    }
                 }
             }
         }
