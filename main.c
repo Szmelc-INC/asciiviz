@@ -16,6 +16,12 @@
 #include "util.h"
 #include "terminal.h"
 
+#define COL_RESET "\x1b[0m"
+#define COL_KEY   "\x1b[1;38;5;208m"   /* orange & bold */
+#define COL_NAME  "\x1b[38;5;30m"       /* dark cyan */
+#define COL_STATE "\x1b[4;38;5;118m"    /* underline lime green */
+#define COL_VALUE "\x1b[1;31m"          /* bright red bold */
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -532,24 +538,46 @@ static void append_str(const char *s){ write(STDOUT_FILENO,s,strlen(s)); }
 
 static void draw_info_bar(App *a){
     if(!a->show_info) return;
-    term_move(a->th, 1);
-    term_clear_line();
-    char bar[1200];
+    char line1[1200];
+    char line2[1200];
     const char *m = (a->cfg.mode==MODE_EXPR)?"expr":(a->cfg.mode==MODE_MANDELBROT)?"mandelbrot":"julia";
     const char *colname = a->cur_col.valid ? a->cur_col.name : "expr";
-    char bgdisp[16]; // printable bg
+    char bgdisp[16];
     snprintf(bgdisp,sizeof(bgdisp),"%s", a->bg.bg.glyph[0] ? a->bg.bg.glyph : " ");
-    // wrap bg glyph in single quotes for clarity
-    char bgshow[24]; snprintf(bgshow,sizeof(bgshow),"'%s'", bgdisp);
+    char bgshow[24];
+    snprintf(bgshow,sizeof(bgshow),"'%s'", bgdisp);
 
-    snprintf(bar,sizeof(bar),
-        "\x1b[0m\x1b[2m[FPS:%d%s] [mode:%s] [color:%s:%s:%s] [char:%s] [bg:%s] [ws:%s]  keys: q quit | p pause | i info | W ws-transp | w cycle-bg | +/- fps | C toggle-color | c next-col | f col-math | n next-char | m next-func | r reload | arrows/[] pan/zoom\x1b[0m",
-        a->cfg.fps, a->paused?" paused":"", m,
-        a->cfg.use_color?"on":"off", colname, a->cfg.color_func?"func":"pal",
-        a->acs.name[0]?a->acs.name:"(unnamed)",
-        bgshow,
-        a->cfg.transparent_ws?"transp":"color");
-    append_str(bar);
+    snprintf(line1,sizeof(line1),
+        COL_RESET "[%sFPS%s:%s%d%s] [%s%s%s](%s%s%s) [%s%s%s](%s%s%s:%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%sws%s:%s%s%s)" COL_RESET,
+        COL_NAME, COL_RESET, COL_VALUE, a->cfg.fps, COL_RESET,
+        COL_KEY, "m", COL_RESET, COL_NAME, m, COL_RESET,
+        COL_KEY, "c", COL_RESET, COL_NAME, colname, COL_RESET, COL_STATE, a->cfg.color_func?"func":"pal", COL_RESET,
+        COL_KEY, "n", COL_RESET, COL_NAME, a->acs.name[0]?a->acs.name:"(unnamed)", COL_RESET,
+        COL_KEY, "w", COL_RESET, COL_VALUE, bgshow, COL_RESET,
+        COL_KEY, "W", COL_RESET, COL_NAME, COL_RESET, COL_STATE, a->cfg.transparent_ws?"transp":"color", COL_RESET);
+
+    snprintf(line2,sizeof(line2),
+        COL_RESET "%s[q]%s quit | %s[p]%s pause | %s[i]%s info | %s[w]%s cycle-bg | %s[W]%s ws-transp | %s[+/-]%s fps | %s[C]%s toggle-color | %s[c]%s next-col | %s[f]%s col-math | %s[n]%s next-char | %s[m]%s next-func | %s[r]%s reload | %s[arrows/[]]%s pan/zoom" COL_RESET,
+        COL_KEY, COL_RESET,  /* q */
+        COL_KEY, COL_RESET,  /* p */
+        COL_KEY, COL_RESET,  /* i */
+        COL_KEY, COL_RESET,  /* w */
+        COL_KEY, COL_RESET,  /* W */
+        COL_KEY, COL_RESET,  /* +/- */
+        COL_KEY, COL_RESET,  /* C */
+        COL_KEY, COL_RESET,  /* c */
+        COL_KEY, COL_RESET,  /* f */
+        COL_KEY, COL_RESET,  /* n */
+        COL_KEY, COL_RESET,  /* m */
+        COL_KEY, COL_RESET,  /* r */
+        COL_KEY, COL_RESET); /* arrows */
+
+    term_move(a->th-1, 1);
+    term_clear_line();
+    append_str(line1);
+    term_move(a->th, 1);
+    term_clear_line();
+    append_str(line2);
 }
 
 static inline size_t cs_idx_from_value(const ActiveCharset *cs, double v){
@@ -591,7 +619,7 @@ static int pixel_color_code(App *a, int i,int j,double x,double y,double t){
 // ---- renderers (expr/mandelbrot/julia) with background substitution -------
 static void render_expr(App *a, double t){
     const int w=a->tw;
-    const int content_h = a->th - (a->show_info ? 1 : 0);
+    const int content_h = a->th - (a->show_info ? 2 : 0);
     double aspect = (double)w/(double)(content_h>0?content_h:1);
 
     for(int j=0;j<content_h;j++){
@@ -636,7 +664,7 @@ static void render_expr(App *a, double t){
 
 static void render_mandel(App *a){
     const int w=a->tw;
-    const int content_h = a->th - (a->show_info ? 1 : 0);
+    const int content_h = a->th - (a->show_info ? 2 : 0);
     const double ar = (double)content_h/(double)(w>0?w:1);
     double t = now_sec() - a->t0;
 
@@ -686,7 +714,7 @@ static void render_mandel(App *a){
 
 static void render_julia(App *a){
     const int w=a->tw;
-    const int content_h = a->th - (a->show_info ? 1 : 0);
+    const int content_h = a->th - (a->show_info ? 2 : 0);
     const double ar = (double)content_h/(double)(w>0?w:1);
     double t = now_sec() - a->t0;
 
