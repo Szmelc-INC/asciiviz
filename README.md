@@ -13,7 +13,7 @@
 > ## Quick Install
 > Clone
 > ```sh
-> git clone https://github.com/Szmelc-INC/asciiviz.git && cd asciiviz
+> git https://github.com/serainox420/asciiviz && cd asciiviz
 > ```
 > Build, install and clean
 > ```sh
