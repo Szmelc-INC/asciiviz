@@ -22,11 +22,17 @@
 #define COL_STATE "\x1b[4;38;5;118m"    /* underline lime green */
 #define COL_VALUE "\x1b[1;31m"          /* bright red bold */
 
-/* colors for editor mode */
-#define COL_EKEY   "\x1b[1;32m"         /* bright green bold */
-#define COL_ENAME  "\x1b[38;5;240m"     /* grey */
-#define COL_EVALUE "\x1b[1;37m"         /* white bold */
-#define COL_ESEL   "\x1b[7m"            /* reverse video for selection */
+/* colors for editor mode (draw & color submodes) */
+static const char *COL_DKEY   = "\x1b[1;32m";       /* draw mode key - bright green */
+static const char *COL_DNAME  = "\x1b[38;5;240m";   /* draw mode name - grey */
+static const char *COL_DVALUE = "\x1b[1;37m";       /* draw mode value - white bold */
+static const char *COL_CKEY   = "\x1b[1;35m";       /* color mode key - bright magenta */
+static const char *COL_CNAME  = "\x1b[38;5;69m";    /* color mode name - blue */
+static const char *COL_CVALUE = "\x1b[1;36m";       /* color mode value - cyan bold */
+static const char *COL_ESEL   = "\x1b[7m";          /* reverse video for selection */
+static const char *COL_EKEY   = NULL;
+static const char *COL_ENAME  = NULL;
+static const char *COL_EVALUE = NULL;
 /* syntax colors for editor expression tokens */
 #define COL_ENUM    "\x1b[38;5;220m"    /* numbers - yellow */
 #define COL_EFUNC   "\x1b[38;5;39m"     /* identifiers/functions - cyan */
@@ -46,6 +52,9 @@ typedef enum { INFO_ALL=0, INFO_NONE=1, INFO_VALUES=2 } InfoMode;
 
 /* application run modes */
 typedef enum { RUNMODE_PLAYER=0, RUNMODE_EDITOR=1 } RunMode;
+
+/* editor submodes for expression editing */
+typedef enum { ESM_DRAW=0, ESM_COLOR=1 } EditorSubMode;
 
 /* editable parameters in editor mode */
 typedef enum {
@@ -548,6 +557,8 @@ typedef struct {
     RunMode       run_mode;      // player or editor
     EditorParam   editor_param;  // currently selected parameter
     int           editor_step_idx; // index into step table
+    EditorSubMode editor_submode; // draw or color expression
+    int           live_preview;   // live preview toggle
     int           editing_text;  // editing raw text flag
     char          edit_buf[1024];
     char          edit_orig[1024];
@@ -593,6 +604,15 @@ static void append_str(const char *s){ ssize_t w=write(STDOUT_FILENO,s,strlen(s)
 static const double EDIT_STEPS[] = {0.01,0.1,1.0,10.0};
 static const int EDIT_STEP_COUNT = sizeof(EDIT_STEPS)/sizeof(EDIT_STEPS[0]);
 
+static void editor_set_submode(App *a, EditorSubMode m){
+    a->editor_submode = m;
+    a->editing_text = 0;
+    a->editing_tokens = 0;
+    COL_EKEY   = (m==ESM_DRAW)?COL_DKEY:COL_CKEY;
+    COL_ENAME  = (m==ESM_DRAW)?COL_DNAME:COL_CNAME;
+    COL_EVALUE = (m==ESM_DRAW)?COL_DVALUE:COL_CVALUE;
+}
+
 static void editor_adjust_param(App *a, int dir){
     double step = EDIT_STEPS[a->editor_step_idx];
     switch(a->editor_param){
@@ -636,6 +656,43 @@ static const char *token_color(TokenType t){
     }
 }
 
+static TokenType classify_token_text(const char *s){
+    if(!s || !*s) return TOK_OTHER;
+    int len=strlen(s);
+    int isnum=1, isident=1;
+    if(!(isdigit((unsigned char)s[0]) || s[0]=='.')) isnum=0;
+    if(!(isalpha((unsigned char)s[0]) || s[0]=='_')) isident=0;
+    for(int i=1;i<len;i++){
+        if(!(isdigit((unsigned char)s[i]) || s[i]=='.')) isnum=0;
+        if(!(isalnum((unsigned char)s[i]) || s[i]=='_')) isident=0;
+    }
+    if(isnum) return TOK_NUMBER;
+    if(isident) return TOK_IDENT;
+    if(len==1){
+        char ch=s[0];
+        if(strchr("+-*/%^",ch)) return TOK_OPERATOR;
+        if(ch=='('||ch==')'||ch==',') return TOK_PAREN;
+    }
+    return TOK_OTHER;
+}
+
+static char *current_expr(App *a){
+    return (a->editor_submode==ESM_DRAW)?a->cfg.expr_value:a->cfg.expr_color;
+}
+
+static void editor_tokens_to_expr(App *a){
+    char buf[1024]; size_t pos=0;
+    for(int i=0;i<a->expr_tok_count;i++){
+        size_t len=strlen(a->expr_tokens[i].text);
+        if(pos+len >= sizeof(buf)) break;
+        memcpy(buf+pos,a->expr_tokens[i].text,len); pos+=len;
+    }
+    buf[pos]=0;
+    char *expr=current_expr(a);
+    strncpy(expr, buf, 1023);
+    expr[1023]=0;
+}
+
 static void format_expr_colored(const char *expr, char *out, size_t outsz){
     Token toks[MAX_TOKENS];
     int cnt = tokenize_expr(expr,toks,MAX_TOKENS);
@@ -660,21 +717,13 @@ static void format_tokens_line(App *a, char *out, size_t outsz){
 }
 
 static void editor_enter_token_mode(App *a){
-    a->expr_tok_count = tokenize_expr(a->cfg.expr_value, a->expr_tokens, MAX_TOKENS);
+    a->expr_tok_count = tokenize_expr(current_expr(a), a->expr_tokens, MAX_TOKENS);
     a->expr_tok_sel = 0;
     a->editing_tokens = 1;
 }
 
 static void editor_exit_token_mode(App *a){
-    char buf[1024]; size_t pos=0;
-    for(int i=0;i<a->expr_tok_count;i++){
-        size_t len=strlen(a->expr_tokens[i].text);
-        if(pos+len >= sizeof(buf)) break;
-        memcpy(buf+pos,a->expr_tokens[i].text,len); pos+=len;
-    }
-    buf[pos]=0;
-    strncpy(a->cfg.expr_value, buf, sizeof(a->cfg.expr_value)-1);
-    a->cfg.expr_value[sizeof(a->cfg.expr_value)-1]=0;
+    editor_tokens_to_expr(a);
     a->editing_tokens = 0;
 }
 
@@ -701,9 +750,10 @@ static void start_text_edit(App *a){
     if(a->editor_param==EP_EXPR){
         a->editing_text = 1;
         a->editing_tokens = 0;
-        strncpy(a->edit_buf, a->cfg.expr_value, sizeof(a->edit_buf)-1);
+        char *expr = current_expr(a);
+        strncpy(a->edit_buf, expr, sizeof(a->edit_buf)-1);
         a->edit_buf[sizeof(a->edit_buf)-1]=0;
-        strncpy(a->edit_orig, a->cfg.expr_value, sizeof(a->edit_orig)-1);
+        strncpy(a->edit_orig, expr, sizeof(a->edit_orig)-1);
         a->edit_orig[sizeof(a->edit_orig)-1]=0;
         a->edit_len = strlen(a->edit_buf);
         a->edit_cursor = a->edit_len;
@@ -712,16 +762,18 @@ static void start_text_edit(App *a){
 
 static void apply_edit_text(App *a, int exit_after){
     if(a->editor_param==EP_EXPR){
-        strncpy(a->cfg.expr_value, a->edit_buf, sizeof(a->cfg.expr_value)-1);
-        a->cfg.expr_value[sizeof(a->cfg.expr_value)-1]=0;
+        char *expr = current_expr(a);
+        strncpy(expr, a->edit_buf, 1023);
+        expr[1023]=0;
     }
     if(exit_after) a->editing_text = 0;
 }
 
 static void cancel_edit_text(App *a){
     if(a->editor_param==EP_EXPR){
-        strncpy(a->cfg.expr_value, a->edit_orig, sizeof(a->cfg.expr_value)-1);
-        a->cfg.expr_value[sizeof(a->cfg.expr_value)-1]=0;
+        char *expr = current_expr(a);
+        strncpy(expr, a->edit_orig, 1023);
+        expr[1023]=0;
     }
     a->editing_text = 0;
 }
@@ -766,13 +818,15 @@ static void format_info_strings(App *a, char *line1, size_t n1, char *line2, siz
         double step = EDIT_STEPS[a->editor_step_idx];
         if(a->editing_tokens){
             if(line1 && n1){
-                char buf[512];
+                char buf[4096];
                 format_tokens_line(a, buf, sizeof(buf));
-                snprintf(line1,n1, COL_RESET "%s", buf);
+                const char *sub = (a->editor_submode==ESM_DRAW)?"DRAW":"COLOR";
+                snprintf(line1,n1, "%s[%s%s%s] %s", COL_RESET, COL_EVALUE, sub, COL_RESET, buf);
             }
             if(line2 && n2){
                 snprintf(line2,n2,
-                    COL_RESET "%s[Enter]%s done | %s[arrows]%s select | %s[+/-]%s adjust | %s[^E]%s raw | %s[^T]%s player | %s[i]%s info" COL_RESET,
+                    COL_RESET "%s[Enter]%s done | %s[arrows]%s select | %s[+/-]%s adjust | %s[^E]%s raw | %s[^T]%s player | %s[^L]%s live | %s[i]%s info" COL_RESET,
+                    COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET,
@@ -784,27 +838,28 @@ static void format_info_strings(App *a, char *line1, size_t n1, char *line2, siz
             if(line1 && n1){
                 const char *sel1 = (a->editor_param==EP_FPS)?COL_ESEL:COL_RESET;
                 const char *sel2 = (a->editor_param==EP_EXPR)?COL_ESEL:COL_RESET;
-                char expr_col[512];
-                format_expr_colored(a->cfg.expr_value, expr_col, sizeof(expr_col));
+                char expr_col[4096];
+                format_expr_colored(current_expr(a), expr_col, sizeof(expr_col));
+                const char *sub = (a->editor_submode==ESM_DRAW)?"DRAW":"COLOR";
                 snprintf(line1,n1,
-                    COL_RESET "%s[" COL_ENAME "FPS" COL_EVALUE ":%d]" COL_RESET " "
-                    "%s[" COL_ENAME "Expr" COL_RESET ":%s]" COL_RESET " "
-                    "[" COL_ENAME "step" COL_RESET ":" COL_EVALUE "%.2f" COL_RESET "]",
-                    sel1, a->cfg.fps,
-                    sel2, expr_col,
-                    step);
+                    "%s[%s%s%s] %s[%sFPS%s:%d]%s %s[%sExpr%s:%s]%s [%sstep%s:%s%.2f%s]",
+                    COL_RESET, COL_EVALUE, sub, COL_RESET,
+                    sel1, COL_ENAME, COL_EVALUE, a->cfg.fps, COL_RESET,
+                    sel2, COL_ENAME, COL_RESET, expr_col, COL_RESET,
+                    COL_ENAME, COL_RESET, COL_EVALUE, step, COL_RESET);
             }
             if(line2 && n2){
                 if(a->editing_text){
-                    char buf[512];
+                    char buf[4096];
                     format_expr_colored(a->edit_buf, buf, sizeof(buf));
                     snprintf(line2,n2,
-                        COL_RESET "Edit: %s%s%s (%s^Y%s save %s^R%s run %s^X%s cancel)" COL_RESET,
+                        COL_RESET "Edit: %s%s%s (%s^Y%s save %s^R%s run %s^X%s cancel %s^L%s live)" COL_RESET,
                         COL_EVALUE, buf, COL_RESET,
-                        COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET);
+                        COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET);
                 }else{
                     snprintf(line2,n2,
-                        COL_RESET "%s[^T]%s player | %s[arrows]%s select/adjust | %s[+/-]%s adjust | %s[[]]%s step | %s[^E]%s edit | %s[i]%s info" COL_RESET,
+                        COL_RESET "%s[^T]%s player | %s[arrows]%s select/adjust | %s[+/-]%s adjust | %s[[]]%s step | %s[^E]%s edit | %s[^L]%s live | %s[i]%s info" COL_RESET,
+                        COL_EKEY, COL_RESET,
                         COL_EKEY, COL_RESET,
                         COL_EKEY, COL_RESET,
                         COL_EKEY, COL_RESET,
@@ -845,7 +900,7 @@ static int print_wrapped(const char *line, int width, int row_start){
 
 static void update_info_rows(App *a){
     if(a->info_mode==INFO_NONE){ a->info_rows=0; return; }
-    char l1[1200]; char l2[1200];
+    char l1[4096]; char l2[4096];
     format_info_strings(a,l1,sizeof(l1),l2,sizeof(l2));
     int lines = count_wrapped(l1,a->tw);
     if(a->info_mode==INFO_ALL) lines += count_wrapped(l2,a->tw);
@@ -860,7 +915,7 @@ static void draw_info_bar(App *a){
         for(int r=clear_start; r<=a->th; ++r){ term_move(r,1); term_clear_line(); }
     }
     if(a->info_mode==INFO_NONE){ prev_lines=0; return; }
-    char line1[1200]; char line2[1200];
+    char line1[4096]; char line2[4096];
     format_info_strings(a,line1,sizeof(line1),line2,sizeof(line2));
     int start = a->th - a->info_rows + 1;
     int l1 = print_wrapped(line1,a->tw,start);
@@ -1142,8 +1197,11 @@ int main(int argc, char **argv){
     app.run_mode = RUNMODE_PLAYER;
     app.editor_param = EP_FPS;
     app.editor_step_idx = 2; /* step=1 */
+    app.editor_submode = ESM_DRAW;
+    app.live_preview = 0;
     app.editing_text = 0; app.edit_buf[0]=0; app.edit_orig[0]=0; app.edit_len=0; app.edit_cursor=0;
     app.editing_tokens = 0; app.expr_tok_count=0; app.expr_tok_sel=0;
+    editor_set_submode(&app, ESM_DRAW);
 
     const char *config_path = NULL;
     const char *preset = NULL;
@@ -1278,14 +1336,21 @@ int main(int argc, char **argv){
                     }
                 }
             }else{ /* editor mode */
+                if(c==0x1b && k+1<n && keys[k+1] != '['){
+                    char d=keys[k+1];
+                    if(d=='c' || d=='C'){ editor_set_submode(&app, ESM_COLOR); k++; continue; }
+                    else if(d=='d' || d=='D'){ editor_set_submode(&app, ESM_DRAW); k++; continue; }
+                }
                 if(app.editing_text){
                     if(c==0x19){ apply_edit_text(&app,1); }
                     else if(c==0x12){ apply_edit_text(&app,0); }
                     else if(c==0x18){ cancel_edit_text(&app); }
+                    else if(c==0x0c){ app.live_preview = !app.live_preview; if(app.live_preview) apply_edit_text(&app,0); }
                     else if(c==0x7f){
                         if(app.edit_cursor>0){
                             memmove(app.edit_buf+app.edit_cursor-1, app.edit_buf+app.edit_cursor, app.edit_len - app.edit_cursor +1);
                             app.edit_cursor--; app.edit_len--;
+                            if(app.live_preview) apply_edit_text(&app,0);
                         }
                     }else if(c==0x1b){
                         if(k+2<n && keys[k+1]=='['){
@@ -1299,20 +1364,45 @@ int main(int argc, char **argv){
                             memmove(app.edit_buf+app.edit_cursor+1, app.edit_buf+app.edit_cursor, app.edit_len - app.edit_cursor +1);
                             app.edit_buf[app.edit_cursor]=c;
                             app.edit_cursor++; app.edit_len++;
+                            if(app.live_preview) apply_edit_text(&app,0);
                         }
                     }
                 }else if(app.editing_tokens){
                     if(c==0x14){ app.run_mode=RUNMODE_PLAYER; }
                     else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
                     else if(c==0x05){ start_text_edit(&app); }
-                    else if(c=='+' || c=='-'){ editor_adjust_token(&app, (c=='+')?+1:-1); }
+                    else if(c==0x0c){ app.live_preview = !app.live_preview; if(app.live_preview) editor_tokens_to_expr(&app); }
+                    else if(c=='+' || c=='-'){ editor_adjust_token(&app, (c=='+')?+1:-1); if(app.live_preview) editor_tokens_to_expr(&app); }
+                    else if(c==0x7f){
+                        Token *t=&app.expr_tokens[app.expr_tok_sel];
+                        size_t len=strlen(t->text);
+                        if(len>0){
+                            t->text[len-1]=0;
+                            t->type=classify_token_text(t->text);
+                            if(len-1==0){
+                                memmove(&app.expr_tokens[app.expr_tok_sel], &app.expr_tokens[app.expr_tok_sel+1], (app.expr_tok_count-app.expr_tok_sel-1)*sizeof(Token));
+                                app.expr_tok_count--;
+                                if(app.expr_tok_sel>=app.expr_tok_count) app.expr_tok_sel=app.expr_tok_count-1;
+                            }
+                            if(app.live_preview) editor_tokens_to_expr(&app);
+                        }
+                    }else if(c>=32 && c<127){
+                        Token *t=&app.expr_tokens[app.expr_tok_sel];
+                        size_t len=strlen(t->text);
+                        if(len+1 < sizeof(t->text)){
+                            t->text[len]=c;
+                            t->text[len+1]=0;
+                            t->type=classify_token_text(t->text);
+                            if(app.live_preview) editor_tokens_to_expr(&app);
+                        }
+                    }
                     else if(c==0x1b){
                         if(k+2<n && keys[k+1]=='['){
                             char d=keys[k+2];
                             if(d=='C') app.expr_tok_sel = (app.expr_tok_sel+1)%app.expr_tok_count;
                             else if(d=='D') app.expr_tok_sel = (app.expr_tok_sel+app.expr_tok_count-1)%app.expr_tok_count;
-                            else if(d=='A') editor_adjust_token(&app,+1);
-                            else if(d=='B') editor_adjust_token(&app,-1);
+                            else if(d=='A') { editor_adjust_token(&app,+1); if(app.live_preview) editor_tokens_to_expr(&app); }
+                            else if(d=='B') { editor_adjust_token(&app,-1); if(app.live_preview) editor_tokens_to_expr(&app); }
                             k+=2;
                         }
                     }else if(c=='\r' || c=='\n'){ editor_exit_token_mode(&app); }
