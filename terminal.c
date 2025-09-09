@@ -25,19 +25,19 @@ void term_raw_off(void){
     tcsetattr(STDIN_FILENO,TCSANOW,&g_old);
     g_raw=0;
 }
-void term_hide_cursor(void){ write(STDOUT_FILENO,"\x1b[?25l",6); }
-void term_show_cursor(void){ write(STDOUT_FILENO,"\x1b[?25h",6); }
-void term_clear(void){ write(STDOUT_FILENO,"\x1b[2J\x1b[H",7); }
+void term_hide_cursor(void){ ssize_t w=write(STDOUT_FILENO,"\x1b[?25l",6); (void)w; }
+void term_show_cursor(void){ ssize_t w=write(STDOUT_FILENO,"\x1b[?25h",6); (void)w; }
+void term_clear(void){ ssize_t w=write(STDOUT_FILENO,"\x1b[2J\x1b[H",7); (void)w; }
 void term_move(int row,int col){
     char esc[32];
     int n=snprintf(esc,sizeof(esc),"\x1b[%d;%dH", row, col);
-    write(STDOUT_FILENO,esc,n);
+    ssize_t w=write(STDOUT_FILENO,esc,n); (void)w;
 }
-void term_clear_line(void){ write(STDOUT_FILENO,"\x1b[2K",4); }
-void term_alt_on(void){ write(STDOUT_FILENO, "\x1b[?1049h", 8); }
-void term_alt_off(void){ write(STDOUT_FILENO, "\x1b[?1049l", 8); }
-void term_wrap_off(void){ write(STDOUT_FILENO, "\x1b[?7l", 5); }
-void term_wrap_on(void){ write(STDOUT_FILENO, "\x1b[?7h", 5); }
+void term_clear_line(void){ ssize_t w=write(STDOUT_FILENO,"\x1b[2K",4); (void)w; }
+void term_alt_on(void){ ssize_t w=write(STDOUT_FILENO, "\x1b[?1049h", 8); (void)w; }
+void term_alt_off(void){ ssize_t w=write(STDOUT_FILENO, "\x1b[?1049l", 8); (void)w; }
+void term_wrap_off(void){ ssize_t w=write(STDOUT_FILENO, "\x1b[?7l", 5); (void)w; }
+void term_wrap_on(void){ ssize_t w=write(STDOUT_FILENO, "\x1b[?7h", 5); (void)w; }
 
 void on_winch(int sig){ (void)sig; g_resized=1; }
 void get_tty_size(int *w,int *h){
