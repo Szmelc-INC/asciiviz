@@ -94,45 +94,47 @@
 
 > ### Config Example
 > ```ini
-[render]
-fps=30
-duration=-1          ; -1 = infinite
-use_color=1          ; 1=256-color, 0=mono
-width=0              ; 0 = use terminal width
-height=0             ; 0 = use terminal height
-charset=" .:-=+*#%@" ; ramp for mono
+>[render]
+>fps=30
+>duration=-1          ; -1 = infinite
+>use_color=1          ; 1=256-color, 0=mono
+>width=0              ; 0 = use terminal width
+>height=0             ; 0 = use terminal height
+>charset=" .:-=+*#%@" ; ramp for mono
+>
+>[mode]
+>type=expr            ; expr | mandelbrot | julia
+>
+>[expr]
+>value="sin(6.0*(x+0.2*sin(t*0.7))+t)*cos(6.0*(y+0.2*cos(t*0.5))-t)"
+>color="128+127*sin(t+3.0*r)" ; 0..255 (only used if use_color=1)
+>
+>[fractal]
+>max_iter=200
+>center_x=-0.5
+>center_y=0.0
+>scale=2.8
+>c_re=-0.8             ; julia only
+>c_im=0.156            ; julia only
+>```
 
-[mode]
-type=expr            ; expr | mandelbrot | julia
+> Character palette template:
+> ```ini
+>[char]
+>name="thin"
+>charset=" .:-=+*#%@"
+>```
 
-[expr]
-value="sin(6.0*(x+0.2*sin(t*0.7))+t)*cos(6.0*(y+0.2*cos(t*0.5))-t)"
-color="128+127*sin(t+3.0*r)" ; 0..255 (only used if use_color=1)
-
-[fractal]
-max_iter=200
-center_x=-0.5
-center_y=0.0
-scale=2.8
-c_re=-0.8             ; julia only
-c_im=0.156            ; julia only
-```
-Character palette template:
-```ini
-[char]
-name="thin"
-charset=" .:-=+*#%@"
-```
-Color palette template:
-```ini
-[color]
-name="rainbow_bands"
-codes="21,27,33,39,45,51,50,49,48,47"
-
-[effect]
-# diagonal bands; wrap by palette length (n)
-index="floor(i*0.07 + j*0.07 + t*3.0) mod n"
-```
+> Color palette template:
+> ```ini
+>[color]
+>name="rainbow_bands"
+>codes="21,27,33,39,45,51,50,49,48,47"
+>
+>[effect]
+># diagonal bands; wrap by palette length (n)
+>index="floor(i*0.07 + j*0.07 + t*3.0) mod n"
+>```
 
 ---
 
