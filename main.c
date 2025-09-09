@@ -437,7 +437,7 @@ static void cs_from_csv(ActiveCharset *cs, const char *csv, const char *name){
     }
 }
 
-static void emit_glyph(const Glyph *g){ write(STDOUT_FILENO,g->glyph,g->glen); }
+static void emit_glyph(const Glyph *g){ ssize_t w=write(STDOUT_FILENO,g->glyph,g->glen); (void)w; }
 
 // ----------------------------- baked palettes hooks ------------------------
 static int g_charpal_idx = -1;        // -1 => fallback from config string
@@ -587,7 +587,7 @@ static void app_query_size(App *a){
     a->tw=w; a->th=h;
 }
 
-static void append_str(const char *s){ write(STDOUT_FILENO,s,strlen(s)); }
+static void append_str(const char *s){ ssize_t w=write(STDOUT_FILENO,s,strlen(s)); (void)w; }
 
 /* --- editor helpers ----------------------------------------------------- */
 static const double EDIT_STEPS[] = {0.01,0.1,1.0,10.0};
@@ -766,7 +766,7 @@ static void format_info_strings(App *a, char *line1, size_t n1, char *line2, siz
         double step = EDIT_STEPS[a->editor_step_idx];
         if(a->editing_tokens){
             if(line1 && n1){
-                char buf[1200];
+                char buf[512];
                 format_tokens_line(a, buf, sizeof(buf));
                 snprintf(line1,n1, COL_RESET "%s", buf);
             }
@@ -784,7 +784,7 @@ static void format_info_strings(App *a, char *line1, size_t n1, char *line2, siz
             if(line1 && n1){
                 const char *sel1 = (a->editor_param==EP_FPS)?COL_ESEL:COL_RESET;
                 const char *sel2 = (a->editor_param==EP_EXPR)?COL_ESEL:COL_RESET;
-                char expr_col[1500];
+                char expr_col[512];
                 format_expr_colored(a->cfg.expr_value, expr_col, sizeof(expr_col));
                 snprintf(line1,n1,
                     COL_RESET "%s[" COL_ENAME "FPS" COL_EVALUE ":%d]" COL_RESET " "
@@ -796,7 +796,7 @@ static void format_info_strings(App *a, char *line1, size_t n1, char *line2, siz
             }
             if(line2 && n2){
                 if(a->editing_text){
-                    char buf[1500];
+                    char buf[512];
                     format_expr_colored(a->edit_buf, buf, sizeof(buf));
                     snprintf(line2,n2,
                         COL_RESET "Edit: %s%s%s (%s^Y%s save %s^R%s run %s^X%s cancel)" COL_RESET,
@@ -835,10 +835,10 @@ static int print_wrapped(const char *line, int width, int row_start){
     term_move(row,1);
     while(*p){
         if(*p=='\x1b'){
-            const char *q=strchr(p,'m'); if(!q) break; write(STDOUT_FILENO,p,q-p+1); p=q+1; continue;
+            const char *q=strchr(p,'m'); if(!q) break; ssize_t w1=write(STDOUT_FILENO,p,q-p+1); (void)w1; p=q+1; continue;
         }
         if(col>=width){ col=0; row++; term_move(row,1); }
-        write(STDOUT_FILENO,p,1); p++; col++;
+        ssize_t w2=write(STDOUT_FILENO,p,1); (void)w2; p++; col++;
     }
     return row - row_start + 1;
 }
@@ -940,7 +940,7 @@ static void render_expr(App *a, double t){
             if(want_color){
                 if(!color_on || ci!=last_ci){
                     char esc[32]; int n=snprintf(esc,sizeof(esc),"\x1b[38;5;%dm",ci);
-                    write(STDOUT_FILENO,esc,n);
+                    ssize_t w3=write(STDOUT_FILENO,esc,n); (void)w3;
                     color_on=1; last_ci=ci;
                 }
             }else{
@@ -990,7 +990,7 @@ static void render_mandel(App *a){
             if(want_color){
                 if(!color_on || ci!=last_ci){
                     char esc[32]; int n=snprintf(esc,sizeof(esc),"\x1b[38;5;%dm",ci);
-                    write(STDOUT_FILENO,esc,n);
+                    ssize_t w4=write(STDOUT_FILENO,esc,n); (void)w4;
                     color_on=1; last_ci=ci;
                 }
             }else{
@@ -1040,7 +1040,7 @@ static void render_julia(App *a){
             if(want_color){
                 if(!color_on || ci!=last_ci){
                     char esc[32]; int n=snprintf(esc,sizeof(esc),"\x1b[38;5;%dm",ci);
-                    write(STDOUT_FILENO,esc,n);
+                    ssize_t w5=write(STDOUT_FILENO,esc,n); (void)w5;
                     color_on=1; last_ci=ci;
                 }
             }else{
