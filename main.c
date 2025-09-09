@@ -568,6 +568,8 @@ typedef struct {
     Token         expr_tokens[MAX_TOKENS];
     int           expr_tok_count;
     int           expr_tok_sel;
+    int           edit_tok_idx;   // token index when raw-editing a block
+    int           pending_brace;  // awaiting brace type after ^P
 
     ActiveCharset acs;
     ActiveColor   cur_col;
@@ -638,7 +640,7 @@ static int tokenize_expr(const char *expr, Token *toks, int max){
             char ch=*p++;
             toks[n].text[0]=ch; toks[n].text[1]=0;
             if(strchr("+-*/%^",ch)) toks[n].type=TOK_OPERATOR;
-            else if(ch=='('||ch==')'||ch==',') toks[n].type=TOK_PAREN;
+            else if(ch=='('||ch==')'||ch=='['||ch==']'||ch=='{'||ch=='}'||ch==',') toks[n].type=TOK_PAREN;
             else toks[n].type=TOK_OTHER;
             n++;
         }
@@ -671,10 +673,14 @@ static TokenType classify_token_text(const char *s){
     if(len==1){
         char ch=s[0];
         if(strchr("+-*/%^",ch)) return TOK_OPERATOR;
-        if(ch=='('||ch==')'||ch==',') return TOK_PAREN;
+        if(ch=='('||ch==')'||ch=='['||ch==']'||ch=='{'||ch=='}'||ch==',') return TOK_PAREN;
     }
     return TOK_OTHER;
 }
+
+static int is_open_brace(char c){ return c=='('||c=='['||c=='{'; }
+static int is_close_brace(char c){ return c==')'||c==']'||c=='}'; }
+static char matching_close(char open){ if(open=='(') return ')'; if(open=='[') return ']'; if(open=='{') return '}'; return 0; }
 
 static char *current_expr(App *a){
     return (a->editor_submode==ESM_DRAW)?a->cfg.expr_value:a->cfg.expr_color;
@@ -720,11 +726,15 @@ static void editor_enter_token_mode(App *a){
     a->expr_tok_count = tokenize_expr(current_expr(a), a->expr_tokens, MAX_TOKENS);
     a->expr_tok_sel = 0;
     a->editing_tokens = 1;
+    a->edit_tok_idx = -1;
+    a->pending_brace = 0;
 }
 
 static void editor_exit_token_mode(App *a){
     editor_tokens_to_expr(a);
     a->editing_tokens = 0;
+    a->edit_tok_idx = -1;
+    a->pending_brace = 0;
 }
 
 static void editor_adjust_token(App *a, int dir){
@@ -746,14 +756,71 @@ static void editor_adjust_token(App *a, int dir){
     }
 }
 
-static void start_text_edit(App *a){
+static void insert_brace_block(App *a, char open){
+    char close=matching_close(open); if(!close) close=')', open='(';
+    if(a->expr_tok_count+3 >= MAX_TOKENS) return;
+    int idx=a->expr_tok_sel;
+    if(idx<0) idx=0;
+    if(idx>a->expr_tok_count) idx=a->expr_tok_count;
+    memmove(&a->expr_tokens[idx+3], &a->expr_tokens[idx], (a->expr_tok_count - idx)*sizeof(Token));
+    a->expr_tokens[idx].text[0]=open; a->expr_tokens[idx].text[1]=0; a->expr_tokens[idx].type=TOK_PAREN;
+    a->expr_tokens[idx+1].text[0]=0; a->expr_tokens[idx+1].type=TOK_OTHER;
+    a->expr_tokens[idx+2].text[0]=close; a->expr_tokens[idx+2].text[1]=0; a->expr_tokens[idx+2].type=TOK_PAREN;
+    a->expr_tok_count+=3;
+    a->expr_tok_sel=idx+1;
+    if(a->live_preview) editor_tokens_to_expr(a);
+}
+
+static void remove_brace_block(App *a){
+    int idx=a->expr_tok_sel;
+    if(a->expr_tok_count<=0) return;
+    int start=-1, end=-1; char open=0; char close=0; int depth=0;
+    for(int i=idx;i>=0;i--){
+        char ch=a->expr_tokens[i].text[0];
+        if(is_close_brace(ch)) depth++;
+        else if(is_open_brace(ch)){
+            if(depth==0){ start=i; open=ch; break; }
+            depth--;
+        }
+    }
+    if(start<0) return;
+    close=matching_close(open);
+    depth=0;
+    for(int i=start;i<a->expr_tok_count;i++){
+        char ch=a->expr_tokens[i].text[0];
+        if(ch==open) depth++;
+        else if(ch==close){
+            depth--;
+            if(depth==0){ end=i; break; }
+        }
+    }
+    if(end<0) return;
+    int remove_count=end-start+1;
+    memmove(&a->expr_tokens[start], &a->expr_tokens[end+1], (a->expr_tok_count-end-1)*sizeof(Token));
+    a->expr_tok_count -= remove_count;
+    if(a->expr_tok_count<=0){ a->expr_tok_sel=0; }
+    else if(a->expr_tok_sel>=start){
+        a->expr_tok_sel = (start < a->expr_tok_count)?start:a->expr_tok_count-1;
+    }
+    if(a->live_preview) editor_tokens_to_expr(a);
+}
+
+static void start_text_edit(App *a, int tok_idx){
     if(a->editor_param==EP_EXPR){
         a->editing_text = 1;
-        a->editing_tokens = 0;
-        char *expr = current_expr(a);
-        strncpy(a->edit_buf, expr, sizeof(a->edit_buf)-1);
+        a->edit_tok_idx = tok_idx;
+        if(tok_idx>=0){
+            a->editing_tokens = 1;
+            a->pending_brace = 0;
+            Token *t=&a->expr_tokens[tok_idx];
+            strncpy(a->edit_buf, t->text, sizeof(a->edit_buf)-1);
+        }else{
+            a->editing_tokens = 0;
+            char *expr = current_expr(a);
+            strncpy(a->edit_buf, expr, sizeof(a->edit_buf)-1);
+        }
         a->edit_buf[sizeof(a->edit_buf)-1]=0;
-        strncpy(a->edit_orig, expr, sizeof(a->edit_orig)-1);
+        strncpy(a->edit_orig, a->edit_buf, sizeof(a->edit_orig)-1);
         a->edit_orig[sizeof(a->edit_orig)-1]=0;
         a->edit_len = strlen(a->edit_buf);
         a->edit_cursor = a->edit_len;
@@ -762,20 +829,36 @@ static void start_text_edit(App *a){
 
 static void apply_edit_text(App *a, int exit_after){
     if(a->editor_param==EP_EXPR){
-        char *expr = current_expr(a);
-        strncpy(expr, a->edit_buf, 1023);
-        expr[1023]=0;
+        if(a->edit_tok_idx>=0){
+            Token *t=&a->expr_tokens[a->edit_tok_idx];
+            strncpy(t->text, a->edit_buf, sizeof(t->text)-1);
+            t->text[sizeof(t->text)-1]=0;
+            t->type=classify_token_text(t->text);
+            if(a->live_preview) editor_tokens_to_expr(a);
+        }else{
+            char *expr = current_expr(a);
+            strncpy(expr, a->edit_buf, 1023);
+            expr[1023]=0;
+        }
     }
-    if(exit_after) a->editing_text = 0;
+    if(exit_after){ a->editing_text = 0; a->edit_tok_idx=-1; a->pending_brace=0; }
 }
 
 static void cancel_edit_text(App *a){
     if(a->editor_param==EP_EXPR){
-        char *expr = current_expr(a);
-        strncpy(expr, a->edit_orig, 1023);
-        expr[1023]=0;
+        if(a->edit_tok_idx>=0){
+            Token *t=&a->expr_tokens[a->edit_tok_idx];
+            strncpy(t->text, a->edit_orig, sizeof(t->text)-1);
+            t->text[sizeof(t->text)-1]=0;
+            t->type=classify_token_text(t->text);
+            if(a->live_preview) editor_tokens_to_expr(a);
+        }else{
+            char *expr = current_expr(a);
+            strncpy(expr, a->edit_orig, 1023);
+            expr[1023]=0;
+        }
     }
-    a->editing_text = 0;
+    a->editing_text = 0; a->edit_tok_idx=-1; a->pending_brace=0;
 }
 
 static void format_info_strings(App *a, char *line1, size_t n1, char *line2, size_t n2){
@@ -824,15 +907,26 @@ static void format_info_strings(App *a, char *line1, size_t n1, char *line2, siz
                 snprintf(line1,n1, "%s[%s%s%s] %s", COL_RESET, COL_EVALUE, sub, COL_RESET, buf);
             }
             if(line2 && n2){
-                snprintf(line2,n2,
-                    COL_RESET "%s[Enter]%s done | %s[arrows]%s select | %s[+/-]%s adjust | %s[^E]%s raw | %s[^T]%s player | %s[^L]%s live | %s[i]%s info" COL_RESET,
-                    COL_EKEY, COL_RESET,
-                    COL_EKEY, COL_RESET,
-                    COL_EKEY, COL_RESET,
-                    COL_EKEY, COL_RESET,
-                    COL_EKEY, COL_RESET,
-                    COL_EKEY, COL_RESET,
-                    COL_EKEY, COL_RESET);
+                if(a->editing_text){
+                    char buf[4096];
+                    format_expr_colored(a->edit_buf, buf, sizeof(buf));
+                    snprintf(line2,n2,
+                        COL_RESET "Block: %s%s%s (%s^Y%s save %s^R%s run %s^X%s cancel %s^L%s live)" COL_RESET,
+                        COL_EVALUE, buf, COL_RESET,
+                        COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET);
+                }else{
+                    snprintf(line2,n2,
+                        COL_RESET "%s[Enter]%s done | %s[arrows]%s sel/adj | %s[e]%s edit | %s[^O]%s rmblk | %s[^P]%s blk | %s[^E]%s raw | %s[^T]%s player | %s[^L]%s live | %s[i]%s info" COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET);
+                }
             }
         }else{
             if(line1 && n1){
@@ -1198,9 +1292,9 @@ int main(int argc, char **argv){
     app.editor_param = EP_FPS;
     app.editor_step_idx = 2; /* step=1 */
     app.editor_submode = ESM_DRAW;
-    app.live_preview = 0;
+    app.live_preview = 1;
     app.editing_text = 0; app.edit_buf[0]=0; app.edit_orig[0]=0; app.edit_len=0; app.edit_cursor=0;
-    app.editing_tokens = 0; app.expr_tok_count=0; app.expr_tok_sel=0;
+    app.editing_tokens = 0; app.expr_tok_count=0; app.expr_tok_sel=0; app.edit_tok_idx=-1; app.pending_brace=0;
     editor_set_submode(&app, ESM_DRAW);
 
     const char *config_path = NULL;
@@ -1368,22 +1462,23 @@ int main(int argc, char **argv){
                         }
                     }
                 }else if(app.editing_tokens){
+                    if(app.pending_brace){
+                        if(c=='('||c=='['||c=='{'){ insert_brace_block(&app,c); app.pending_brace=0; continue; }
+                        app.pending_brace=0;
+                    }
                     if(c==0x14){ app.run_mode=RUNMODE_PLAYER; }
                     else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
-                    else if(c==0x05){ start_text_edit(&app); }
+                    else if(c==0x05){ start_text_edit(&app,-1); }
+                    else if(c=='e'){ start_text_edit(&app, app.expr_tok_sel); }
                     else if(c==0x0c){ app.live_preview = !app.live_preview; if(app.live_preview) editor_tokens_to_expr(&app); }
-                    else if(c=='+' || c=='-'){ editor_adjust_token(&app, (c=='+')?+1:-1); if(app.live_preview) editor_tokens_to_expr(&app); }
+                    else if(c==0x0f){ remove_brace_block(&app); }
+                    else if(c==0x10){ app.pending_brace=1; }
                     else if(c==0x7f){
                         Token *t=&app.expr_tokens[app.expr_tok_sel];
                         size_t len=strlen(t->text);
                         if(len>0){
                             t->text[len-1]=0;
                             t->type=classify_token_text(t->text);
-                            if(len-1==0){
-                                memmove(&app.expr_tokens[app.expr_tok_sel], &app.expr_tokens[app.expr_tok_sel+1], (app.expr_tok_count-app.expr_tok_sel-1)*sizeof(Token));
-                                app.expr_tok_count--;
-                                if(app.expr_tok_sel>=app.expr_tok_count) app.expr_tok_sel=app.expr_tok_count-1;
-                            }
                             if(app.live_preview) editor_tokens_to_expr(&app);
                         }
                     }else if(c>=32 && c<127){
@@ -1413,7 +1508,7 @@ int main(int argc, char **argv){
                     else if(c=='-'){ editor_adjust_param(&app,-1); }
                     else if(c=='['){ if(app.editor_step_idx>0) app.editor_step_idx--; }
                     else if(c==']'){ if(app.editor_step_idx+1<EDIT_STEP_COUNT) app.editor_step_idx++; }
-                    else if(c==0x05){ start_text_edit(&app); }
+                    else if(c==0x05){ start_text_edit(&app,-1); }
                     else if((c=='\r' || c=='\n') && app.editor_param==EP_EXPR){ editor_enter_token_mode(&app); }
                     else if(c==0x1b){
                         if(k+2<n && keys[k+1]=='['){
