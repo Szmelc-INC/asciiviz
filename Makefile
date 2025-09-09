@@ -1,6 +1,6 @@
 # Makefile — builds asciiviz and bakes presets + palettes
 APP       := asciiviz
-SRC       := main.c util.c terminal.c
+SRC       := asciiviz.c
 PRESETS_H := baked_presets.h
 PALETTES_H:= baked_palettes.h
 
