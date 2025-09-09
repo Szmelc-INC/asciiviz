@@ -27,6 +27,11 @@
 #define COL_ENAME  "\x1b[38;5;240m"     /* grey */
 #define COL_EVALUE "\x1b[1;37m"         /* white bold */
 #define COL_ESEL   "\x1b[7m"            /* reverse video for selection */
+/* syntax colors for editor expression tokens */
+#define COL_ENUM    "\x1b[38;5;220m"    /* numbers - yellow */
+#define COL_EFUNC   "\x1b[38;5;39m"     /* identifiers/functions - cyan */
+#define COL_EOP     "\x1b[1;35m"        /* operators - magenta bold */
+#define COL_EPAR    "\x1b[38;5;244m"    /* parentheses/commas - grey */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -48,6 +53,22 @@ typedef enum {
     EP_EXPR=1,
     EP_COUNT
 } EditorParam;
+
+/* expression tokenization for editor */
+typedef enum {
+    TOK_NUMBER,
+    TOK_IDENT,
+    TOK_OPERATOR,
+    TOK_PAREN,
+    TOK_OTHER
+} TokenType;
+
+typedef struct {
+    TokenType type;
+    char      text[64];
+} Token;
+
+#define MAX_TOKENS 128
 
 typedef struct {
     // render
@@ -531,6 +552,11 @@ typedef struct {
     char          edit_buf[1024];
     char          edit_orig[1024];
     size_t        edit_len;
+    size_t        edit_cursor;
+    int           editing_tokens; // editing expression tokens
+    Token         expr_tokens[MAX_TOKENS];
+    int           expr_tok_count;
+    int           expr_tok_sel;
 
     ActiveCharset acs;
     ActiveColor   cur_col;
@@ -578,14 +604,109 @@ static void editor_adjust_param(App *a, int dir){
     }
 }
 
+/* token helpers ----------------------------------------------------------- */
+static int tokenize_expr(const char *expr, Token *toks, int max){
+    int n=0; const char *p=expr;
+    while(*p && n<max){
+        if(isdigit((unsigned char)*p) || (*p=='.' && isdigit((unsigned char)p[1]))){
+            int len=0; while((isdigit((unsigned char)*p) || *p=='.') && len<63){ toks[n].text[len++]=*p++; }
+            toks[n].text[len]=0; toks[n].type=TOK_NUMBER; n++;
+        }else if(isalpha((unsigned char)*p)){
+            int len=0; while((isalnum((unsigned char)*p) || *p=='_') && len<63){ toks[n].text[len++]=*p++; }
+            toks[n].text[len]=0; toks[n].type=TOK_IDENT; n++;
+        }else{
+            char ch=*p++;
+            toks[n].text[0]=ch; toks[n].text[1]=0;
+            if(strchr("+-*/%^",ch)) toks[n].type=TOK_OPERATOR;
+            else if(ch=='('||ch==')'||ch==',') toks[n].type=TOK_PAREN;
+            else toks[n].type=TOK_OTHER;
+            n++;
+        }
+    }
+    return n;
+}
+
+static const char *token_color(TokenType t){
+    switch(t){
+        case TOK_NUMBER: return COL_ENUM;
+        case TOK_IDENT:  return COL_EFUNC;
+        case TOK_OPERATOR: return COL_EOP;
+        case TOK_PAREN: return COL_EPAR;
+        default: return COL_EVALUE;
+    }
+}
+
+static void format_expr_colored(const char *expr, char *out, size_t outsz){
+    Token toks[MAX_TOKENS];
+    int cnt = tokenize_expr(expr,toks,MAX_TOKENS);
+    size_t pos=0;
+    for(int i=0;i<cnt && pos<outsz; i++){
+        const char *col = token_color(toks[i].type);
+        pos += snprintf(out+pos,outsz-pos,"%s%s%s",col,toks[i].text,COL_RESET);
+    }
+    if(pos<outsz) out[pos]=0; else out[outsz-1]=0;
+}
+
+static void format_tokens_line(App *a, char *out, size_t outsz){
+    size_t pos=0;
+    for(int i=0;i<a->expr_tok_count && pos<outsz; i++){
+        Token *t=&a->expr_tokens[i];
+        const char *col=token_color(t->type);
+        const char *sel=(i==a->expr_tok_sel)?COL_ESEL:"";
+        pos += snprintf(out+pos,outsz-pos,"%s[%s%s%s]%s",COL_RESET,sel,col,t->text,COL_RESET);
+        if(i+1<a->expr_tok_count) pos+=snprintf(out+pos,outsz-pos," ");
+    }
+    if(pos<outsz) out[pos]=0; else out[outsz-1]=0;
+}
+
+static void editor_enter_token_mode(App *a){
+    a->expr_tok_count = tokenize_expr(a->cfg.expr_value, a->expr_tokens, MAX_TOKENS);
+    a->expr_tok_sel = 0;
+    a->editing_tokens = 1;
+}
+
+static void editor_exit_token_mode(App *a){
+    char buf[1024]; size_t pos=0;
+    for(int i=0;i<a->expr_tok_count;i++){
+        size_t len=strlen(a->expr_tokens[i].text);
+        if(pos+len >= sizeof(buf)) break;
+        memcpy(buf+pos,a->expr_tokens[i].text,len); pos+=len;
+    }
+    buf[pos]=0;
+    strncpy(a->cfg.expr_value, buf, sizeof(a->cfg.expr_value)-1);
+    a->cfg.expr_value[sizeof(a->cfg.expr_value)-1]=0;
+    a->editing_tokens = 0;
+}
+
+static void editor_adjust_token(App *a, int dir){
+    if(a->expr_tok_sel<0 || a->expr_tok_sel>=a->expr_tok_count) return;
+    Token *t=&a->expr_tokens[a->expr_tok_sel];
+    double step = EDIT_STEPS[a->editor_step_idx];
+    if(t->type==TOK_NUMBER){
+        double v=atof(t->text);
+        v += dir*step;
+        snprintf(t->text,sizeof(t->text),"%g",v);
+    }else if(t->type==TOK_OPERATOR){
+        const char ops[]="+-*/%^";
+        char *p=strchr(ops,t->text[0]);
+        if(p){ int idx=(int)(p-ops); int len=strlen(ops); idx=(idx+dir+len)%len; t->text[0]=ops[idx]; t->text[1]=0; }
+    }else if(t->type==TOK_IDENT){
+        const char *funcs[]={"sin","cos","tan"};
+        int n=3; int idx=-1; for(int i=0;i<n;i++) if(strcmp(t->text,funcs[i])==0){ idx=i; break; }
+        if(idx>=0){ idx=(idx+dir+n)%n; snprintf(t->text,sizeof(t->text),"%s",funcs[idx]); }
+    }
+}
+
 static void start_text_edit(App *a){
     if(a->editor_param==EP_EXPR){
         a->editing_text = 1;
+        a->editing_tokens = 0;
         strncpy(a->edit_buf, a->cfg.expr_value, sizeof(a->edit_buf)-1);
         a->edit_buf[sizeof(a->edit_buf)-1]=0;
         strncpy(a->edit_orig, a->cfg.expr_value, sizeof(a->edit_orig)-1);
         a->edit_orig[sizeof(a->edit_orig)-1]=0;
         a->edit_len = strlen(a->edit_buf);
+        a->edit_cursor = a->edit_len;
     }
 }
 
@@ -643,32 +764,54 @@ static void format_info_strings(App *a, char *line1, size_t n1, char *line2, siz
         }
     }else{ /* editor mode */
         double step = EDIT_STEPS[a->editor_step_idx];
-        if(line1 && n1){
-            const char *sel1 = (a->editor_param==EP_FPS)?COL_ESEL:COL_RESET;
-            const char *sel2 = (a->editor_param==EP_EXPR)?COL_ESEL:COL_RESET;
-            snprintf(line1,n1,
-                COL_RESET "%s[" COL_ENAME "FPS" COL_EVALUE ":%d]" COL_RESET " "
-                "%s[" COL_ENAME "Expr" COL_EVALUE ":%s]" COL_RESET " "
-                "[" COL_ENAME "step" COL_RESET ":" COL_EVALUE "%.2f" COL_RESET "]",
-                sel1, a->cfg.fps,
-                sel2, a->cfg.expr_value,
-                step);
-        }
-        if(line2 && n2){
-            if(a->editing_text){
+        if(a->editing_tokens){
+            if(line1 && n1){
+                char buf[1200];
+                format_tokens_line(a, buf, sizeof(buf));
+                snprintf(line1,n1, COL_RESET "%s", buf);
+            }
+            if(line2 && n2){
                 snprintf(line2,n2,
-                    COL_RESET "Edit: %s%s%s (%s^S%s save %s^R%s run %s^X%s cancel)" COL_RESET,
-                    COL_EVALUE, a->edit_buf, COL_RESET,
-                    COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET);
-            }else{
-                snprintf(line2,n2,
-                    COL_RESET "%s[^T]%s player | %s[arrows]%s select/adjust | %s[+/-]%s adjust | %s[[]]%s step | %s[^E]%s edit | %s[i]%s info" COL_RESET,
+                    COL_RESET "%s[Enter]%s done | %s[arrows]%s select | %s[+/-]%s adjust | %s[^E]%s raw | %s[^T]%s player | %s[i]%s info" COL_RESET,
                     COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET,
                     COL_EKEY, COL_RESET);
+            }
+        }else{
+            if(line1 && n1){
+                const char *sel1 = (a->editor_param==EP_FPS)?COL_ESEL:COL_RESET;
+                const char *sel2 = (a->editor_param==EP_EXPR)?COL_ESEL:COL_RESET;
+                char expr_col[1500];
+                format_expr_colored(a->cfg.expr_value, expr_col, sizeof(expr_col));
+                snprintf(line1,n1,
+                    COL_RESET "%s[" COL_ENAME "FPS" COL_EVALUE ":%d]" COL_RESET " "
+                    "%s[" COL_ENAME "Expr" COL_RESET ":%s]" COL_RESET " "
+                    "[" COL_ENAME "step" COL_RESET ":" COL_EVALUE "%.2f" COL_RESET "]",
+                    sel1, a->cfg.fps,
+                    sel2, expr_col,
+                    step);
+            }
+            if(line2 && n2){
+                if(a->editing_text){
+                    char buf[1500];
+                    format_expr_colored(a->edit_buf, buf, sizeof(buf));
+                    snprintf(line2,n2,
+                        COL_RESET "Edit: %s%s%s (%s^Y%s save %s^R%s run %s^X%s cancel)" COL_RESET,
+                        COL_EVALUE, buf, COL_RESET,
+                        COL_EKEY, COL_RESET, COL_EKEY, COL_RESET, COL_EKEY, COL_RESET);
+                }else{
+                    snprintf(line2,n2,
+                        COL_RESET "%s[^T]%s player | %s[arrows]%s select/adjust | %s[+/-]%s adjust | %s[[]]%s step | %s[^E]%s edit | %s[i]%s info" COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET,
+                        COL_EKEY, COL_RESET);
+                }
             }
         }
     }
@@ -999,7 +1142,8 @@ int main(int argc, char **argv){
     app.run_mode = RUNMODE_PLAYER;
     app.editor_param = EP_FPS;
     app.editor_step_idx = 2; /* step=1 */
-    app.editing_text = 0; app.edit_buf[0]=0; app.edit_orig[0]=0; app.edit_len=0;
+    app.editing_text = 0; app.edit_buf[0]=0; app.edit_orig[0]=0; app.edit_len=0; app.edit_cursor=0;
+    app.editing_tokens = 0; app.expr_tok_count=0; app.expr_tok_sel=0;
 
     const char *config_path = NULL;
     const char *preset = NULL;
@@ -1135,11 +1279,43 @@ int main(int argc, char **argv){
                 }
             }else{ /* editor mode */
                 if(app.editing_text){
-                    if(c==0x13){ apply_edit_text(&app,1); }
+                    if(c==0x19){ apply_edit_text(&app,1); }
                     else if(c==0x12){ apply_edit_text(&app,0); }
                     else if(c==0x18){ cancel_edit_text(&app); }
-                    else if(c==0x7f){ if(app.edit_len>0) { app.edit_buf[--app.edit_len]=0; } }
-                    else if(c>=32 && c<127){ if(app.edit_len<sizeof(app.edit_buf)-1){ app.edit_buf[app.edit_len++]=c; app.edit_buf[app.edit_len]=0; } }
+                    else if(c==0x7f){
+                        if(app.edit_cursor>0){
+                            memmove(app.edit_buf+app.edit_cursor-1, app.edit_buf+app.edit_cursor, app.edit_len - app.edit_cursor +1);
+                            app.edit_cursor--; app.edit_len--;
+                        }
+                    }else if(c==0x1b){
+                        if(k+2<n && keys[k+1]=='['){
+                            char d=keys[k+2];
+                            if(d=='C' && app.edit_cursor<app.edit_len) app.edit_cursor++;
+                            else if(d=='D' && app.edit_cursor>0) app.edit_cursor--;
+                            k+=2;
+                        }
+                    }else if(c>=32 && c<127){
+                        if(app.edit_len<sizeof(app.edit_buf)-1){
+                            memmove(app.edit_buf+app.edit_cursor+1, app.edit_buf+app.edit_cursor, app.edit_len - app.edit_cursor +1);
+                            app.edit_buf[app.edit_cursor]=c;
+                            app.edit_cursor++; app.edit_len++;
+                        }
+                    }
+                }else if(app.editing_tokens){
+                    if(c==0x14){ app.run_mode=RUNMODE_PLAYER; }
+                    else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
+                    else if(c==0x05){ start_text_edit(&app); }
+                    else if(c=='+' || c=='-'){ editor_adjust_token(&app, (c=='+')?+1:-1); }
+                    else if(c==0x1b){
+                        if(k+2<n && keys[k+1]=='['){
+                            char d=keys[k+2];
+                            if(d=='C') app.expr_tok_sel = (app.expr_tok_sel+1)%app.expr_tok_count;
+                            else if(d=='D') app.expr_tok_sel = (app.expr_tok_sel+app.expr_tok_count-1)%app.expr_tok_count;
+                            else if(d=='A') editor_adjust_token(&app,+1);
+                            else if(d=='B') editor_adjust_token(&app,-1);
+                            k+=2;
+                        }
+                    }else if(c=='\r' || c=='\n'){ editor_exit_token_mode(&app); }
                 }else{
                     if(c==0x14){ app.run_mode=RUNMODE_PLAYER; }
                     else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
@@ -1148,6 +1324,7 @@ int main(int argc, char **argv){
                     else if(c=='['){ if(app.editor_step_idx>0) app.editor_step_idx--; }
                     else if(c==']'){ if(app.editor_step_idx+1<EDIT_STEP_COUNT) app.editor_step_idx++; }
                     else if(c==0x05){ start_text_edit(&app); }
+                    else if((c=='\r' || c=='\n') && app.editor_param==EP_EXPR){ editor_enter_token_mode(&app); }
                     else if(c==0x1b){
                         if(k+2<n && keys[k+1]=='['){
                             char d=keys[k+2];
