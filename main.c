@@ -16,6 +16,12 @@
 #include "util.h"
 #include "terminal.h"
 
+#define COL_RESET "\x1b[0m"
+#define COL_KEY   "\x1b[1;38;5;208m"   /* orange & bold */
+#define COL_NAME  "\x1b[38;5;30m"       /* dark cyan */
+#define COL_STATE "\x1b[4;38;5;118m"    /* underline lime green */
+#define COL_VALUE "\x1b[1;31m"          /* bright red bold */
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -24,6 +30,8 @@
 
 // ----------------------------- config --------------------------------------
 typedef enum { MODE_EXPR=0, MODE_MANDELBROT=1, MODE_JULIA=2 } ModeType;
+
+typedef enum { INFO_ALL=0, INFO_NONE=1, INFO_VALUES=2 } InfoMode;
 
 typedef struct {
     // render
@@ -497,7 +505,8 @@ typedef struct {
     int           tw, th;
     double        t0;
     int           paused;
-    int           show_info;
+    InfoMode      info_mode;     // info bar mode
+    int           info_rows;     // computed lines reserved for info bar
 
     ActiveCharset acs;
     ActiveColor   cur_col;
@@ -530,26 +539,94 @@ static void app_query_size(App *a){
 
 static void append_str(const char *s){ write(STDOUT_FILENO,s,strlen(s)); }
 
-static void draw_info_bar(App *a){
-    if(!a->show_info) return;
-    term_move(a->th, 1);
-    term_clear_line();
-    char bar[1200];
+static void format_info_strings(App *a, char *line1, size_t n1, char *line2, size_t n2){
     const char *m = (a->cfg.mode==MODE_EXPR)?"expr":(a->cfg.mode==MODE_MANDELBROT)?"mandelbrot":"julia";
     const char *colname = a->cur_col.valid ? a->cur_col.name : "expr";
-    char bgdisp[16]; // printable bg
+    char bgdisp[16];
     snprintf(bgdisp,sizeof(bgdisp),"%s", a->bg.bg.glyph[0] ? a->bg.bg.glyph : " ");
-    // wrap bg glyph in single quotes for clarity
-    char bgshow[24]; snprintf(bgshow,sizeof(bgshow),"'%s'", bgdisp);
+    char bgshow[24];
+    snprintf(bgshow,sizeof(bgshow),"'%s'", bgdisp);
 
-    snprintf(bar,sizeof(bar),
-        "\x1b[0m\x1b[2m[FPS:%d%s] [mode:%s] [color:%s:%s:%s] [char:%s] [bg:%s] [ws:%s]  keys: q quit | p pause | i info | W ws-transp | w cycle-bg | +/- fps | C toggle-color | c next-col | f col-math | n next-char | m next-func | r reload | arrows/[] pan/zoom\x1b[0m",
-        a->cfg.fps, a->paused?" paused":"", m,
-        a->cfg.use_color?"on":"off", colname, a->cfg.color_func?"func":"pal",
-        a->acs.name[0]?a->acs.name:"(unnamed)",
-        bgshow,
-        a->cfg.transparent_ws?"transp":"color");
-    append_str(bar);
+    if(line1 && n1){
+        snprintf(line1,n1,
+            COL_RESET "[%sFPS%s:%s%d%s] [%s%s%s](%s%s%s) [%s%s%s](%s%s%s:%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%s%s%s) [%s%s%s](%sws%s:%s%s%s)" COL_RESET,
+            COL_NAME, COL_RESET, COL_VALUE, a->cfg.fps, COL_RESET,
+            COL_KEY, "m", COL_RESET, COL_NAME, m, COL_RESET,
+            COL_KEY, "c", COL_RESET, COL_NAME, colname, COL_RESET, COL_STATE, a->cfg.color_func?"func":"pal", COL_RESET,
+            COL_KEY, "n", COL_RESET, COL_NAME, a->acs.name[0]?a->acs.name:"(unnamed)", COL_RESET,
+            COL_KEY, "w", COL_RESET, COL_VALUE, bgshow, COL_RESET,
+            COL_KEY, "W", COL_RESET, COL_NAME, COL_RESET, COL_STATE, a->cfg.transparent_ws?"transp":"color", COL_RESET);
+    }
+    if(line2 && n2){
+        snprintf(line2,n2,
+            COL_RESET "%s[q]%s quit | %s[p]%s pause | %s[i]%s info | %s[w]%s cycle-bg | %s[W]%s ws-transp | %s[+/-]%s fps | %s[C]%s toggle-color | %s[c]%s next-col | %s[f]%s col-math | %s[n]%s next-char | %s[m]%s next-func | %s[r]%s reload | %s[arrows/[]]%s pan/zoom" COL_RESET,
+            COL_KEY, COL_RESET,  /* q */
+            COL_KEY, COL_RESET,  /* p */
+            COL_KEY, COL_RESET,  /* i */
+            COL_KEY, COL_RESET,  /* w */
+            COL_KEY, COL_RESET,  /* W */
+            COL_KEY, COL_RESET,  /* +/- */
+            COL_KEY, COL_RESET,  /* C */
+            COL_KEY, COL_RESET,  /* c */
+            COL_KEY, COL_RESET,  /* f */
+            COL_KEY, COL_RESET,  /* n */
+            COL_KEY, COL_RESET,  /* m */
+            COL_KEY, COL_RESET,  /* r */
+            COL_KEY, COL_RESET); /* arrows */
+    }
+}
+
+static int count_wrapped(const char *line, int width){
+    if(width<=0 || !line || !*line) return 0;
+    int col=0, rows=1; const char *p=line;
+    while(*p){
+        if(*p=='\x1b'){
+            const char *q=strchr(p,'m'); if(!q) break; p=q+1; continue;
+        }
+        if(col>=width){ rows++; col=0; }
+        col++; p++;
+    }
+    return rows;
+}
+
+static int print_wrapped(const char *line, int width, int row_start){
+    int col=0; int row=row_start; const char *p=line;
+    term_move(row,1);
+    while(*p){
+        if(*p=='\x1b'){
+            const char *q=strchr(p,'m'); if(!q) break; write(STDOUT_FILENO,p,q-p+1); p=q+1; continue;
+        }
+        if(col>=width){ col=0; row++; term_move(row,1); }
+        write(STDOUT_FILENO,p,1); p++; col++;
+    }
+    return row - row_start + 1;
+}
+
+static void update_info_rows(App *a){
+    if(a->info_mode==INFO_NONE){ a->info_rows=0; return; }
+    char l1[1200]; char l2[1200];
+    format_info_strings(a,l1,sizeof(l1),l2,sizeof(l2));
+    int lines = count_wrapped(l1,a->tw);
+    if(a->info_mode==INFO_ALL) lines += count_wrapped(l2,a->tw);
+    a->info_rows = lines;
+}
+
+static void draw_info_bar(App *a){
+    static int prev_lines=0;
+    int max_lines = (a->info_rows>prev_lines)?a->info_rows:prev_lines;
+    if(max_lines){
+        int clear_start = a->th - max_lines + 1;
+        for(int r=clear_start; r<=a->th; ++r){ term_move(r,1); term_clear_line(); }
+    }
+    if(a->info_mode==INFO_NONE){ prev_lines=0; return; }
+    char line1[1200]; char line2[1200];
+    format_info_strings(a,line1,sizeof(line1),line2,sizeof(line2));
+    int start = a->th - a->info_rows + 1;
+    int l1 = print_wrapped(line1,a->tw,start);
+    if(a->info_mode==INFO_ALL){
+        print_wrapped(line2,a->tw,start + l1);
+    }
+    prev_lines = a->info_rows;
 }
 
 static inline size_t cs_idx_from_value(const ActiveCharset *cs, double v){
@@ -591,7 +668,7 @@ static int pixel_color_code(App *a, int i,int j,double x,double y,double t){
 // ---- renderers (expr/mandelbrot/julia) with background substitution -------
 static void render_expr(App *a, double t){
     const int w=a->tw;
-    const int content_h = a->th - (a->show_info ? 1 : 0);
+    const int content_h = a->th - a->info_rows;
     double aspect = (double)w/(double)(content_h>0?content_h:1);
 
     for(int j=0;j<content_h;j++){
@@ -636,7 +713,7 @@ static void render_expr(App *a, double t){
 
 static void render_mandel(App *a){
     const int w=a->tw;
-    const int content_h = a->th - (a->show_info ? 1 : 0);
+    const int content_h = a->th - a->info_rows;
     const double ar = (double)content_h/(double)(w>0?w:1);
     double t = now_sec() - a->t0;
 
@@ -686,7 +763,7 @@ static void render_mandel(App *a){
 
 static void render_julia(App *a){
     const int w=a->tw;
-    const int content_h = a->th - (a->show_info ? 1 : 0);
+    const int content_h = a->th - a->info_rows;
     const double ar = (double)content_h/(double)(w>0?w:1);
     double t = now_sec() - a->t0;
 
@@ -817,7 +894,8 @@ static void usage(const char *argv0){
 int main(int argc, char **argv){
     App app; memset(&app,0,sizeof(app));
     set_defaults(&app.cfg);
-    app.show_info = 1;
+    app.info_mode = INFO_ALL;
+    app.info_rows = 0;
     app.cached_col_idx = -9999;
     app.cur_preset_idx = -1;
 
@@ -916,7 +994,7 @@ int main(int argc, char **argv){
             unsigned char c=keys[k];
             if(c=='q') goto out;
             else if(c=='p'){ app.paused = !app.paused; if(!app.paused) start = now_sec() - (app.t0 - start); }
-            else if(c=='i'){ app.show_info = !app.show_info; }
+            else if(c=='i'){ app.info_mode = (app.info_mode + 1) % 3; }
             else if(c=='W'){ app.cfg.transparent_ws = !app.cfg.transparent_ws; }
             else if(c=='w'){ bg_cycle_next(&app.bg); }
             else if(c=='+'){ app.cfg.fps = clamp_long(app.cfg.fps+1,1,240); }
@@ -952,7 +1030,7 @@ int main(int argc, char **argv){
                 }
             }
         }
-
+        update_info_rows(&app);
         // draw
         if(app.cfg.mode==MODE_EXPR) render_expr(&app, t);
         else if(app.cfg.mode==MODE_MANDELBROT) render_mandel(&app);
