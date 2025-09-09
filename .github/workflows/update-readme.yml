@@ -1,0 +1,26 @@
+name: Update README
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh README timestamp
+        run: |
+          ts=$(date -u '+%Y-%m-%d %H:%M UTC')
+          if grep -q '^Last updated:' README.md; then
+            sed -i "s/^Last updated:.*/Last updated: $ts/" README.md
+          else
+            printf 'Last updated: %s\n\n%s' "$ts" "$(cat README.md)" > README.md
+          fi
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'docs: update README'
+          file_pattern: README.md
