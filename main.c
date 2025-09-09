@@ -560,10 +560,14 @@ static inline size_t cs_idx_from_value(const ActiveCharset *cs, double v){
 }
 
 static inline int col_idx_from_value(const ActiveColor *ac, double v){
-    int n = ac->count; if(n<=1) return 0;
-    double t = (v+1.0)*0.5; if(t<0)t=0; if(t>1)t=1;
+    int n = ac->count;
+    if(n<=1) return 0;
+    double t = (v+1.0)*0.5;
+    if(t<0) t=0;
+    if(t>1) t=1;
     int idx = (int)floor(t*(n-1)+0.5);
-    if(idx<0) idx=0; if(idx>=n) idx=n-1;
+    if(idx<0) idx=0;
+    if(idx>=n) idx=n-1;
     return idx;
 }
 
@@ -607,7 +611,8 @@ static void render_expr(App *a, double t){
 
             int ci;
             if(a->cfg.color_func && a->cur_col.valid && a->cur_col.count>0){
-                int cidx = col_idx_from_value(&a->cur_col, val);
+                int n=a->cur_col.count;
+                int cidx = (col_idx_from_value(&a->cur_col, val) + (int)lrint(t*20.0)) % n;
                 ci = a->cur_col.codes[cidx];
             } else {
                 ci = pixel_color_code(a,i,j,x,y,t);
@@ -633,6 +638,7 @@ static void render_mandel(App *a){
     const int w=a->tw;
     const int content_h = a->th - (a->show_info ? 1 : 0);
     const double ar = (double)content_h/(double)(w>0?w:1);
+    double t = now_sec() - a->t0;
 
     for(int j=0;j<content_h;j++){
         term_move(j+1, 1);
@@ -655,10 +661,11 @@ static void render_mandel(App *a){
 
             int ci;
             if(a->cfg.color_func && a->cur_col.valid && a->cur_col.count>0){
-                int cidx = col_idx_from_value(&a->cur_col, tval);
+                int n=a->cur_col.count;
+                int cidx = (iter + (int)lrint(t*20.0)) % n;
                 ci = a->cur_col.codes[cidx];
             } else {
-                ci = pixel_color_code(a,i,j,x0,y0, now_sec()-a->t0);
+                ci = pixel_color_code(a,i,j,x0,y0,t);
             }
             int want_color = (ci>=0) && !(a->cfg.transparent_ws && eg->is_space);
 
@@ -681,6 +688,7 @@ static void render_julia(App *a){
     const int w=a->tw;
     const int content_h = a->th - (a->show_info ? 1 : 0);
     const double ar = (double)content_h/(double)(w>0?w:1);
+    double t = now_sec() - a->t0;
 
     for(int j=0;j<content_h;j++){
         term_move(j+1, 1);
@@ -703,10 +711,11 @@ static void render_julia(App *a){
 
             int ci;
             if(a->cfg.color_func && a->cur_col.valid && a->cur_col.count>0){
-                int cidx = col_idx_from_value(&a->cur_col, tval);
+                int n=a->cur_col.count;
+                int cidx = (iter + (int)lrint(t*20.0)) % n;
                 ci = a->cur_col.codes[cidx];
             } else {
-                ci = pixel_color_code(a,i,j,zx,zy, now_sec()-a->t0);
+                ci = pixel_color_code(a,i,j,zx,zy,t);
             }
             int want_color = (ci>=0) && !(a->cfg.transparent_ws && eg->is_space);
 
