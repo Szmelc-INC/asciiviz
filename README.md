@@ -5,6 +5,8 @@
 <table><tr><td>ASCII/ANSI function visualizer for your terminal</td></tr></table>
 <i><samp><h4>Render math expressions, Mandelbrot and Julia fractals with colorful palettes</h4></samp></i>
 
+<img width="750" height="400" alt="image" src="https://github.com/user-attachments/assets/4e877290-0b3d-425a-8ae1-c7a04d710cf5" />
+
 </div>
 
 ---
